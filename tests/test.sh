@@ -171,6 +171,14 @@ actual=$?
 set -e
 [[ $actual -ne 0 ]] || { printf 'expected 200 to be rejected where 303 is required\n' >&2; exit 1; }
 
+# systemd would read a bare memory number as bytes, so the installer must refuse
+# it rather than install a unit that cannot start.
+set +e
+DSH_DRY_RUN=yes DSH_MEMORY_MAX=1024 bash "$root/install.sh" >/dev/null 2>&1
+actual=$?
+set -e
+[[ $actual -ne 0 ]] || { printf 'a bare memory value (bytes to systemd) was accepted\n' >&2; exit 1; }
+
 if command -v "$node_bin" >/dev/null 2>&1; then
   "$node_bin" --test "$root/tests/verify-ws.test.cjs"
 else

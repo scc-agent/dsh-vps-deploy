@@ -94,7 +94,7 @@ sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 
 也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
 
-通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 资源上限为 `MemoryHigh=512M`、`MemoryMax=768M`、`CPUQuota=75%`、`TasksMax=128`，并启用 `NoNewPrivileges`、`PrivateDevices`、`ProtectSystem=strict`、`ProtectHome`、`ProtectKernelTunables/Modules/Logs` 和空的 `CapabilityBoundingSet`，由独立的服务用户运行。
+通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 资源上限可调：`DSH_MEMORY_HIGH`（默认 `512M`）、`DSH_MEMORY_MAX`（默认 `768M`）、`DSH_CPU_QUOTA`（默认 `75%`）、`DSH_TASKS_MAX`（默认 `128`）。两个内存值**必须带单位后缀**（`512M`、`1G`）；systemd 把裸数字当字节，`DSH_MEMORY_MAX=1024` 会得到 1 KiB 上限、服务根本起不来，所以安装器直接拒绝这种写法。实测（2 GiB VPS、单 agent、普通对话）峰值约 400 MiB，距默认 `MemoryHigh` 只有约 100 MiB 余量；跑重活（大仓库构建、批量改动）建议 `DSH_MEMORY_HIGH=1G DSH_MEMORY_MAX=1536M`，自己量用 `systemctl show dsh-web.service -p MemoryPeak,MemoryHigh,MemoryMax`。越过 `MemoryHigh` 会被回收压力限流，越过 `MemoryMax` 会 OOM 杀掉**整个 Web UI**（不是只杀当次任务）。其余硬化项：`NoNewPrivileges`、`PrivateDevices`、`ProtectSystem=strict`、`ProtectHome`、`ProtectKernelTunables/Modules/Logs` 和空的 `CapabilityBoundingSet`，由独立的服务用户运行。
 
 ## 认证与验证
 

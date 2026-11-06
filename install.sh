@@ -28,9 +28,10 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${DSH_DRY_RUN:=no}"
 : "${DSH_TAILSCALE_INSTALL:=no}"
 : "${DSH_VERIFY_WS:=yes}"
-# Resource ceilings for the DSH unit. Sized for a 2 GiB VPS running one agent:
-# measured peak is ~330 MiB, so MemoryMax leaves headroom for a big turn while
-# still capping a runaway. Raise them for heavy builds.
+# Resource ceilings for the DSH unit; override with DSH_MEMORY_HIGH=1G etc.
+# Measured on a 2 GiB VPS under normal agent use: ~400 MiB peak, so the defaults
+# leave roughly 100 MiB under MemoryHigh. Crossing MemoryHigh throttles with
+# reclaim pressure; crossing MemoryMax OOM-kills the whole Web UI, not one turn.
 : "${DSH_MEMORY_HIGH:=512M}"
 : "${DSH_MEMORY_MAX:=768M}"
 : "${DSH_CPU_QUOTA:=75%}"
@@ -57,6 +58,10 @@ Variables:
   DSH_HOME=/var/lib/dsh        service data dir, DSH_HOME (default /var/lib/dsh)
   DSH_APP_ROOT=/opt/dsh        program root, app installed in $DSH_APP_ROOT/app
   DSH_PORT=3080                DSH listener port
+  DSH_MEMORY_HIGH=512M         unit MemoryHigh; a size suffix is mandatory
+  DSH_MEMORY_MAX=768M          unit MemoryMax; a size suffix is mandatory
+  DSH_CPU_QUOTA=75%            unit CPUQuota
+  DSH_TASKS_MAX=128            unit TasksMax
   DSH_TLS_CERT / DSH_TLS_KEY   use an existing certificate pair instead
   DSH_TLS_DIR=/etc/dsh/tls     where self-signed files are written
   DSH_TLS_KEY_TYPE             rsa2048 (default) or ecdsa
@@ -79,6 +84,13 @@ fi
 [[ $DSH_APP_ROOT == /* && $DSH_APP_ROOT != / ]] || fail 'DSH_APP_ROOT must be an absolute path other than /'
 [[ $DSH_HOME == /* && $DSH_HOME != / ]] || fail 'DSH_HOME must be an absolute path other than /'
 [[ $DSH_APP_ROOT/ != "$DSH_HOME"/* && $DSH_HOME/ != "$DSH_APP_ROOT"/* ]] || fail 'DSH_APP_ROOT and DSH_HOME must not contain each other'
+# systemd reads a bare memory number as bytes, so DSH_MEMORY_MAX=1024 would mean
+# a 1 KiB ceiling and a unit that never starts. Require the suffix instead of
+# letting that fail silently at cgroup level.
+[[ $DSH_MEMORY_HIGH =~ ^([0-9]+[KMGTPkmgtp]|infinity)$ ]] || fail 'DSH_MEMORY_HIGH needs a size suffix (for example 512M or 1G); a bare number means bytes to systemd'
+[[ $DSH_MEMORY_MAX =~ ^([0-9]+[KMGTPkmgtp]|infinity)$ ]] || fail 'DSH_MEMORY_MAX needs a size suffix (for example 768M or 1G); a bare number means bytes to systemd'
+[[ $DSH_CPU_QUOTA =~ ^[0-9]{1,3}%$ ]] || fail 'DSH_CPU_QUOTA must be a percentage such as 75%'
+[[ $DSH_TASKS_MAX =~ ^[0-9]+$ ]] || fail 'DSH_TASKS_MAX must be an integer'
 
 DSH_NATIVE_TLS=no
 case "$DSH_TAILSCALE_MODE" in
