@@ -289,29 +289,18 @@ if [[ $DSH_ENABLE == yes ]]; then
     || fail 'authenticated entrypoint did not satisfy the configured Cookie policy; refusing to claim installation success'
   printf 'entry verification: 401 unauthenticated, 303 login redirect, hardened cookie at %s\n' "$DSH_PUBLIC_URL"
 
-  # 3. WebSocket upgrade must be accepted on the DSH listener itself.
+  # 3. WebSocket upgrade over the real external entrypoint: this is the path a
+  #    browser takes, so it exercises Serve (and the proxy in fallback mode).
+  #    The login cookie is scoped to that host, so it must be presented there.
   if [[ $DSH_VERIFY_WS == yes ]]; then
-    # The credential lives on the public root path, so reuse that path (and any
-    # configured prefix) against the loopback listener instead of guessing.
-    public_path=$(printf '%s' "$login_url" | sed -E 's#^https?://[^/]+##')
-    [[ -n $public_path ]] || public_path='/'
-    if [[ $DSH_NATIVE_TLS == yes ]]; then
-      ws_url="https://127.0.0.1:${DSH_PORT}${DSH_WS_PATH}"
-      local_login="https://127.0.0.1:${DSH_PORT}${public_path}"
-    else
-      ws_url="http://127.0.0.1:${DSH_PROXY_PORT}${DSH_WS_PATH}"
-      local_login="http://127.0.0.1:${DSH_PROXY_PORT}${public_path}"
-    fi
+    ws_url="${DSH_PUBLIC_URL%/}${DSH_WS_PATH}"
     jar=$(mktemp)
     chmod 0600 "$jar"
-    curl_args=(--silent --show-error --output /dev/null --max-time 15 -c "$jar")
-    [[ $DSH_NATIVE_TLS == yes ]] && curl_args+=(--insecure)
-    curl "${curl_args[@]}" "$local_login" >/dev/null 2>&1 || true
-    # No Host override: the login cookie is issued for the loopback host, so the
-    # upgrade must present that same host to be authenticated.
+    curl --silent --show-error --output /dev/null --max-time 15 --insecure \
+      -c "$jar" "$login_url" >/dev/null 2>&1 || true
     if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" --insecure; then
       rm -f "$jar"
-      printf 'websocket verification: upgrade handshake returned 101 with an authenticated cookie\n'
+      printf 'websocket verification: upgrade handshake returned 101 at %s\n' "$ws_url"
     else
       rm -f "$jar"
       fail 'WebSocket upgrade did not return 101; inspect the unit journal and rerun'

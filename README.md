@@ -87,7 +87,9 @@ sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
 2. 带凭据的登录 URL 必须返回 **303** 跳转。
 3. `Set-Cookie` 必须同时含 `Secure`、`HttpOnly`、`SameSite=Strict`（原生 TLS 模式下由 DSH 依据 https 的 public-url 自行下发）。
 
-任一项不符合就退出，不会声称安装成功。随后还会对 `https://127.0.0.1:3080/api/remote.mux`（回退模式为 3081）带登录 Cookie 做一次 upgrade 握手，必须拿到 **101**；自签证书用 `NODE_TLS_REJECT_UNAUTHORIZED=0` 之类的等价方式跳过校验（脚本内部用 `--insecure` 只跳过本地校验）。可用 `DSH_VERIFY_WS=no` 跳过 WS 检查，但不建议。
+任一项不符合就退出，不会声称安装成功。随后还会用带登录 Cookie 的请求对**真实外部入口**（`${DSH_PUBLIC_URL}/api/remote.mux`）做一次真正的 upgrade 握手，必须拿到 **101**。这条路径和浏览器一致，同时覆盖了 Serve；自签证书由脚本用 `--insecure` 只跳过本机校验。可用 `DSH_VERIFY_WS=no` 跳过 WS 检查，但不建议。
+
+> 说明：Cookie 是绑定到签发它的主机名的（原生 TLS 下是 `127.0.0.1`，代理回退下是公开的 MagicDNS 名），所以这条检查必须走公开入口；用 loopback 直连且改写 `Host` 会被 DSH 判成未认证。
 
 完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
 

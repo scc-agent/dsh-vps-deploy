@@ -108,28 +108,13 @@ set -e
 [[ $foreign -ne 0 ]] || die 'a foreign Serve handler was treated as ours'
 pass 'still refuses to take over a foreign Serve handler'
 
-# --- loopback login URL reconstruction --------------------------------------
-# The credential URL carries its token on the public root path; the installer
-# must reuse that path rather than assuming "/login".
-path_of() { printf '%s' "$1" | sed -E 's#^https?://[^/]+##'; }
-[[ $(path_of 'https://vps.test.ts.net/?token=redacted') == '/?token=redacted' ]] || die 'root-path credential URL was not preserved'
-[[ $(path_of 'https://vps.test.ts.net/ui/?token=redacted') == '/ui/?token=redacted' ]] || die 'prefixed credential URL lost its path'
-[[ $(path_of 'https://vps.test.ts.net') == '' ]] || die 'bare origin should yield an empty path'
-pass 'reconstructs the loopback login path from the public credential URL'
-
-set +e
-printf '%s' 'https://vps.test.ts.net/?token=redacted&x=1' > /dev/null
-grep -Fq 'public_path=' "$root/install.sh"
-pathed=$?
-set -e
-[[ $pathed -eq 0 ]] || die 'installer does not derive the loopback login path'
-pass 'installer derives the loopback login path from the credential URL'
-
-# The login cookie is scoped to the loopback host, so the upgrade request must
-# not pretend to be the public host or DSH rejects it as unauthenticated.
-! grep -Fq -- '--host "$DSH_TRUSTED_HOST"' "$root/install.sh" \
-  || die 'websocket check overrides Host and would lose the loopback-scoped cookie'
-pass 'websocket check keeps the loopback host that the cookie was issued for'
+# The upgrade must be checked over the real external entrypoint (the browser
+# path, which exercises Serve), not a loopback shortcut that can disagree.
+grep -Fq 'ws_url="${DSH_PUBLIC_URL%/}${DSH_WS_PATH}"' "$root/install.sh" \
+  || die 'websocket check does not use the public entrypoint'
+grep -Fq -- '--cookie-jar "$jar" --insecure' "$root/install.sh" \
+  || die 'websocket check does not present the login cookie'
+pass 'websocket check runs over the public entrypoint with the login cookie' 
 
 # --- installer defaults ------------------------------------------------------
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh" || die 'default mode is not serve'
