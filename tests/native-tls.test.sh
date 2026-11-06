@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline coverage for the default native TLS mode and the proxy fallback.
+# Offline coverage for the default native TLS mode.
 set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
@@ -59,7 +59,7 @@ set -e
 [[ $rc -ne 0 ]] || die 'unsafe host name was accepted'
 pass 'rejects unsafe certificate host names'
 
-# --- Serve parameters per mode ---------------------------------------------
+# --- Serve parameters ------------------------------------------------------
 mock="$work/tailscale"
 cat > "$mock" <<'MOCK'
 #!/usr/bin/env bash
@@ -86,22 +86,20 @@ run_serve 'https+insecure://127.0.0.1:3080' || die 'serve apply failed for nativ
 grep -Fq -- '--https=443 https+insecure://127.0.0.1:3080' "$work/serve.log" || die "native TLS Serve args wrong: $(cat "$work/serve.log")"
 pass 'serve uses https+insecure://127.0.0.1:3080 for native TLS'
 
-: > "$work/serve.log"
-run_serve 'http://127.0.0.1:3081' || die 'serve apply failed for proxy backend'
-grep -Fq -- 'http://127.0.0.1:3081' "$work/serve.log" || die 'proxy backend was not passed to Serve'
-pass 'proxy fallback still serves http://127.0.0.1:3081'
+! grep -Fq 'http://127.0.0.1:3081' "$root/install.sh" || die 'installer still wires the retired proxy backend into Serve'
+pass 'Serve is only ever pointed at the native TLS listener'
 
-# --- migration from the legacy proxy topology -------------------------------
+# --- upgrades from the retired proxy topology --------------------------------
 # An existing handler pointing at our own old proxy port must be replaceable,
 # while a foreign handler must still be refused.
 TS_LOG="$work/migrate.log" TS_STATUS="$work/migrate.json" DSH_TAILSCALE_BIN="$mock" \
-  DSH_SERVE_BACKEND='https+insecure://127.0.0.1:3080' DSH_PORT=3080 DSH_PROXY_PORT=3081 \
+  DSH_SERVE_BACKEND='https+insecure://127.0.0.1:3080' DSH_PORT=3080 \
   bash -c ". '$root/tools/tailscale-serve.sh'; _ts_owns_handler '{\"Proxy\":\"http://127.0.0.1:3081\"}'" 2>/dev/null \
-  || die 'legacy proxy handler was not recognised as our own'
-pass 'recognises the legacy proxy handler as ours during migration'
+  || die 'a legacy proxy handler was not recognised as ours'
+pass 'recognises a retired-proxy handler as ours during upgrade'
 
 set +e
-DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 \
+DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 \
   bash -c ". '$root/tools/tailscale-serve.sh'; _ts_owns_handler '{\"Proxy\":\"http://127.0.0.1:9999\"}'" 2>/dev/null
 foreign=$?
 set -e
@@ -121,24 +119,22 @@ pass 'websocket check runs over the probe entrypoint with the login cookie'
 
 # --- installer defaults ------------------------------------------------------
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh" || die 'default mode is not serve'
-grep -Fq 'DSH_TLS_MODE:=native' "$root/install.sh" || die 'native TLS is not the default TLS mode'
+! grep -Fq 'DSH_TLS_MODE' "$root/install.sh" || die 'the removed DSH_TLS_MODE switch is still in the installer'
 grep -Fq 'gen_selfsigned_cert' "$root/install.sh" || die 'installer does not generate a certificate'
 grep -Fq -- '--tls-cert' "$root/bin/dsh-web-start.sh" || die 'DSH start script does not pass --tls-cert'
 pass 'default mode is native TLS with generated certificates'
 
-if grep -Fq 'systemctl enable --now dsh-web-proxy.service' "$root/install.sh" &&
-   ! grep -Fq 'if [[ $DSH_USE_PROXY == yes ]]; then systemctl enable --now "$PROXY_UNIT_NAME"; fi' "$root/install.sh"; then
-  die 'proxy service is enabled unconditionally'
-fi
-grep -Fq 'if [[ $DSH_USE_PROXY == yes ]]; then' "$root/install.sh" || die 'proxy enablement is not gated'
+! grep -Fq 'systemctl enable "$PROXY_UNIT_NAME"' "$root/install.sh" || die 'the removed proxy unit is still enabled'
+! grep -Fq 'DSH_USE_PROXY' "$root/install.sh" || die 'proxy mode switch is still in the installer'
 grep -Fq 'systemctl restart "$UNIT_NAME"' "$root/install.sh" || die 'installer does not restart the unit, so a re-run would keep the old process'
 ! grep -Fq 'systemctl enable --now "$UNIT_NAME"' "$root/install.sh" || die 'enable --now leaves an already-running unit on its old flags'
 pass 'installer restarts the unit so re-runs apply new flags'
-pass 'proxy service is never enabled by default'
+pass 'no proxy unit is installed or enabled'
 
-grep -Fq 'DSH_TLS_MODE=proxy' "$root/README.md" || die 'README does not document the proxy fallback switch'
+! grep -Fq 'DSH_TLS_MODE' "$root/README.md" || die 'README still documents the removed TLS mode switch'
+grep -Fq 'DSH_TAILSCALE_MODE=local-only' "$root/README.md" || die 'README no longer documents local-only'
 grep -Fq 'openssl x509 -enddate' "$root/README.md" || die 'README diagnostics lack the expiry command'
-pass 'README documents the fallback switch and the expiry check'
+pass 'README documents native TLS, local-only, and the expiry check'
 
 if command -v "$node_bin" >/dev/null 2>&1; then
   "$node_bin" --check "$root/tools/verify-ws.mjs" || die 'verify-ws.mjs does not parse'

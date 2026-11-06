@@ -5,7 +5,7 @@ readonly VERSION='0.2.2-rc.1'
 readonly PACKAGE="@deepseek-ai/dsh@${VERSION}"
 readonly EXPECTED_INTEGRITY='sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg=='
 readonly UNIT_NAME='dsh-web.service'
-readonly PROXY_UNIT_NAME='dsh-web-proxy.service'
+readonly LEGACY_PROXY_UNIT_NAME='dsh-web-proxy.service'
 readonly MARKER='# Managed by dsh-vps-deploy; review before changing.'
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -15,14 +15,9 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # agent it hosts) cannot rewrite its own installation.
 : "${DSH_APP_ROOT:=/opt/dsh}"
 : "${DSH_PORT:=3080}"
-: "${DSH_PROXY_PORT:=3081}"
 : "${DSH_ENABLE:=yes}"
-# serve (default: native TLS + Serve), serve-proxy (legacy local proxy),
-# local-only (SSH tunnel), external-proxy.
+# serve (default: native TLS + Serve) or local-only (SSH tunnel).
 : "${DSH_TAILSCALE_MODE:=serve}"
-# native (default) or proxy; proxy downgrades the default serve mode to the
-# legacy 3081 local-proxy topology.
-: "${DSH_TLS_MODE:=native}"
 : "${DSH_TLS_DIR:=/etc/dsh/tls}"
 : "${DSH_PUBLIC_URL:=}"
 : "${DSH_TRUSTED_HOST:=}"
@@ -44,20 +39,17 @@ usage: sudo ./install.sh
 Default: native TLS with a generated self-signed certificate in /etc/dsh/tls,
 served by DSH on https 127.0.0.1:3080 and published with
   tailscale serve --bg --https=443 https+insecure://127.0.0.1:3080
-No local proxy is installed or enabled in this mode.
+DSH terminates TLS itself; no local reverse proxy is installed.
 
 Modes:
-  DSH_TLS_MODE=proxy                       legacy proxy fallback (127.0.0.1:3081)
-  DSH_TAILSCALE_MODE=serve-proxy           same as above, explicit form
+  DSH_TAILSCALE_MODE=serve                 native TLS + Tailscale Serve (default)
   DSH_TAILSCALE_MODE=local-only            loopback only, for SSH tunnels
-  DSH_TAILSCALE_MODE=external-proxy        bring your own HTTPS reverse proxy
 
 Variables:
-  DSH_USER=dsH                 service user (default dsh)
+  DSH_USER=dsh                 service user (default dsh)
   DSH_HOME=/var/lib/dsh        service data dir, DSH_HOME (default /var/lib/dsh)
   DSH_APP_ROOT=/opt/dsh        program root, app installed in $DSH_APP_ROOT/app
   DSH_PORT=3080                DSH listener port
-  DSH_PROXY_PORT=3081          legacy proxy port (fallback modes only)
   DSH_TLS_CERT / DSH_TLS_KEY   use an existing certificate pair instead
   DSH_TLS_DIR=/etc/dsh/tls     where self-signed files are written
   DSH_TLS_KEY_TYPE             rsa2048 (default) or ecdsa
@@ -69,9 +61,7 @@ USAGE
 fi
 [[ $EUID -eq 0 ]] || fail 'run as root (for example: sudo ./install.sh)'
 [[ $DSH_PORT =~ ^[0-9]+$ && $DSH_PORT -ge 1 && $DSH_PORT -le 65535 ]] || fail 'DSH_PORT must be 1..65535'
-[[ $DSH_PROXY_PORT =~ ^[0-9]+$ && $DSH_PROXY_PORT -ge 1 && $DSH_PROXY_PORT -le 65535 && $DSH_PROXY_PORT != "$DSH_PORT" ]] || fail 'DSH_PROXY_PORT must be 1..65535 and differ from DSH_PORT'
-[[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy || $DSH_TAILSCALE_MODE == local-only || $DSH_TAILSCALE_MODE == external-proxy ]] || fail 'DSH_TAILSCALE_MODE must be serve, serve-proxy, local-only, or external-proxy'
-[[ $DSH_TLS_MODE == native || $DSH_TLS_MODE == proxy ]] || fail 'DSH_TLS_MODE must be native or proxy'
+[[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == local-only ]] || fail 'DSH_TAILSCALE_MODE must be serve or local-only'
 [[ $DSH_DRY_RUN == yes || $DSH_DRY_RUN == no ]] || fail 'DSH_DRY_RUN must be yes or no'
 [[ $DSH_ENABLE == yes || $DSH_ENABLE == no ]] || fail 'DSH_ENABLE must be yes or no'
 [[ $DSH_VERIFY_WS == yes || $DSH_VERIFY_WS == no ]] || fail 'DSH_VERIFY_WS must be yes or no'
@@ -79,21 +69,11 @@ fi
 [[ $DSH_HOME == /* && $DSH_HOME != / ]] || fail 'DSH_HOME must be an absolute path other than /'
 [[ $DSH_APP_ROOT/ != "$DSH_HOME"/* && $DSH_HOME/ != "$DSH_APP_ROOT"/* ]] || fail 'DSH_APP_ROOT and DSH_HOME must not contain each other'
 
-# The legacy proxy topology is now strictly opt-in. DSH_TLS_MODE=proxy is the
-# short form of asking for it in the default serve mode.
-if [[ $DSH_TAILSCALE_MODE == serve && $DSH_TLS_MODE == proxy ]]; then
-  DSH_TAILSCALE_MODE=serve-proxy
-fi
-
-DSH_USE_PROXY=no
 DSH_NATIVE_TLS=no
 case "$DSH_TAILSCALE_MODE" in
   serve) DSH_NATIVE_TLS=yes;;
-  serve-proxy|external-proxy) DSH_USE_PROXY=yes;;
   local-only) ;;
 esac
-DSH_PROXY_SECURE_COOKIES=no
-[[ $DSH_USE_PROXY == yes ]] && DSH_PROXY_SECURE_COOKIES=yes
 
 if [[ -n $DSH_TLS_CERT || -n $DSH_TLS_KEY ]]; then
   [[ -n $DSH_TLS_CERT && -n $DSH_TLS_KEY ]] || fail 'DSH_TLS_CERT and DSH_TLS_KEY must be provided together'
@@ -107,12 +87,10 @@ fi
 [[ -r "$SCRIPT_DIR/tools/gen-selfsigned-cert.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/gen-selfsigned-cert.sh"
 [[ -r "$SCRIPT_DIR/tools/probe-url.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/probe-url.sh"
 [[ -r "$SCRIPT_DIR/tools/verify-ws.mjs" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-ws.mjs"
-[[ -r "$SCRIPT_DIR/bin/dsh-web-proxy.cjs" ]] || fail "missing resource: $SCRIPT_DIR/bin/dsh-web-proxy.cjs"
-[[ -r "$SCRIPT_DIR/systemd/dsh-web-proxy.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web-proxy.service.in"
 
 if [[ $DSH_DRY_RUN == yes ]]; then
-  printf 'dry-run: mode=%s, tls=%s, proxy=%s, resources=%s, unit=%s, no host changes made\n' \
-    "$DSH_TAILSCALE_MODE" "$([[ $DSH_NATIVE_TLS == yes ]] && printf selfsigned || printf none)" "$DSH_USE_PROXY" "$SCRIPT_DIR" "$UNIT_NAME"
+  printf 'dry-run: mode=%s, tls=%s, resources=%s, unit=%s, no host changes made\n' \
+    "$DSH_TAILSCALE_MODE" "$([[ $DSH_NATIVE_TLS == yes ]] && printf selfsigned || printf none)" "$SCRIPT_DIR" "$UNIT_NAME"
   exit 0
 fi
 
@@ -122,7 +100,7 @@ source "$SCRIPT_DIR/tools/gen-selfsigned-cert.sh"
 source "$SCRIPT_DIR/tools/probe-url.sh"
 
 tailscale_host=''
-if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; then
+if [[ $DSH_TAILSCALE_MODE == serve ]]; then
   if ! command -v "$DSH_TAILSCALE_BIN" >/dev/null 2>&1; then
     tailscale_auto_install || exit $?
   fi
@@ -139,8 +117,8 @@ else
 fi
 [[ $DSH_PUBLIC_URL == https://* || $DSH_PUBLIC_URL == http://* ]] || fail 'DSH_PUBLIC_URL must be an http(s) URL'
 [[ -n $DSH_TRUSTED_HOST ]] || fail 'DSH_TRUSTED_HOST is required'
-if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; then
-  [[ $DSH_PUBLIC_URL == https://* ]] || fail 'private HTTPS modes require an https DSH_PUBLIC_URL (secure cookies need the external HTTPS origin)'
+if [[ $DSH_TAILSCALE_MODE == serve ]]; then
+  [[ $DSH_PUBLIC_URL == https://* ]] || fail 'serve mode requires an https DSH_PUBLIC_URL (secure cookies need the HTTPS origin)'
 fi
 if [[ $DSH_NATIVE_TLS == yes ]]; then
   # Native TLS terminates HTTPS locally, so the advertised origin must be https.
@@ -238,7 +216,8 @@ DSH_ENTRYPOINT="$DSH_APP_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
 DSH_BIN=/usr/local/libexec/dsh-cli
 
 unit_path=/etc/systemd/system/$UNIT_NAME
-proxy_unit_path=/etc/systemd/system/$PROXY_UNIT_NAME
+# Retired topology: an old install may still have this unit on disk.
+proxy_unit_path=/etc/systemd/system/$LEGACY_PROXY_UNIT_NAME
 if [[ -e $unit_path ]] && ! grep -Fqx "$MARKER" "$unit_path"; then
   fail "$unit_path exists and is not managed by this project"
 fi
@@ -247,7 +226,6 @@ if [[ -e $proxy_unit_path ]] && ! grep -Fqx "$MARKER" "$proxy_unit_path"; then
 fi
 install -d -m 0755 /usr/local/libexec
 install -m 0755 "$SCRIPT_DIR/bin/dsh-cli.sh" /usr/local/libexec/dsh-cli
-install -m 0644 "$SCRIPT_DIR/bin/dsh-web-proxy.cjs" /usr/local/libexec/dsh-web-proxy.cjs
 start_template=$(<"$SCRIPT_DIR/bin/dsh-web-start.sh")
 start_template=${start_template//@DSH_BIN@/$DSH_BIN}
 printf '%s\n' "$start_template" | install -m 0755 /dev/stdin /usr/local/libexec/dsh-web-start
@@ -259,17 +237,6 @@ unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
 unit_template=${unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
 printf '%s\n' "$unit_template" | install -m 0644 /dev/stdin "$unit_path"
 
-# The loopback proxy unit is only materialised for the opt-in fallback modes.
-if [[ $DSH_USE_PROXY == yes ]]; then
-  proxy_unit_template=$(<"$SCRIPT_DIR/systemd/dsh-web-proxy.service.in")
-  proxy_unit_template=${proxy_unit_template//@MARKER@/$MARKER}
-  proxy_unit_template=${proxy_unit_template//@DSH_USER@/$DSH_USER}
-  proxy_unit_template=${proxy_unit_template//@DSH_HOME@/$DSH_HOME}
-  proxy_unit_template=${proxy_unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
-  proxy_unit_template=${proxy_unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
-  printf '%s\n' "$proxy_unit_template" | install -m 0644 /dev/stdin "$proxy_unit_path"
-fi
-
 # Write secrets/config atomically; the env file is never world-readable.
 env_tmp=$(mktemp /etc/dsh/dsh-web.env.XXXXXX)
 trap 'rm -f "$env_tmp"' EXIT
@@ -280,10 +247,7 @@ trap 'rm -f "$env_tmp"' EXIT
   printf 'DSH_PUBLIC_URL=%q\n' "$DSH_PUBLIC_URL"
   printf 'DSH_TRUSTED_HOST=%q\n' "$DSH_TRUSTED_HOST"
   printf 'DSH_PORT=%q\n' "$DSH_PORT"
-  printf 'DSH_PROXY_PORT=%q\n' "$DSH_PROXY_PORT"
-  printf 'DSH_PROXY_SECURE_COOKIES=%q\n' "$DSH_PROXY_SECURE_COOKIES"
   printf 'DSH_TAILSCALE_MODE=%q\n' "$DSH_TAILSCALE_MODE"
-  printf 'DSH_TLS_MODE=%q\n' "$([[ $DSH_NATIVE_TLS == yes ]] && printf native || printf proxy)"
   printf 'DSH_TLS_CERT=%q\n' "$DSH_TLS_CERT"
   printf 'DSH_TLS_KEY=%q\n' "$DSH_TLS_KEY"
 } > "$env_tmp"
@@ -293,30 +257,23 @@ mv -f "$env_tmp" /etc/dsh/dsh-web.env
 trap - EXIT
 
 systemctl daemon-reload
-if [[ $DSH_USE_PROXY == no && -e $proxy_unit_path ]]; then
-  # Migrating away from the legacy topology: stop and forget the proxy unit.
-  systemctl disable --now "$PROXY_UNIT_NAME" >/dev/null 2>&1 || true
+if [[ -e $proxy_unit_path ]]; then
+  # Upgrading from the removed proxy topology: stop and forget that unit so it
+  # cannot keep listening on 3081 or shadow the native TLS listener.
+  systemctl disable --now "$LEGACY_PROXY_UNIT_NAME" >/dev/null 2>&1 || true
   rm -f "$proxy_unit_path"
   systemctl daemon-reload
-  printf 'retired legacy %s (native TLS mode does not use it)\n' "$PROXY_UNIT_NAME"
+  printf 'retired legacy %s (native TLS replaces it)\n' "$LEGACY_PROXY_UNIT_NAME"
 fi
 if [[ $DSH_ENABLE == yes ]]; then
   # `enable --now` is a no-op on an already-running unit, which would leave the
   # old process (old env file, old flags) serving traffic. Always restart.
   systemctl enable "$UNIT_NAME"
   systemctl restart "$UNIT_NAME"
-  if [[ $DSH_USE_PROXY == yes ]]; then
-    systemctl enable "$PROXY_UNIT_NAME"
-    systemctl restart "$PROXY_UNIT_NAME"
-  fi
 fi
-if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; then
-  if [[ $DSH_NATIVE_TLS == yes ]]; then
-    # Self-signed certificate is only trusted inside the tunnel.
-    DSH_SERVE_BACKEND="https+insecure://127.0.0.1:${DSH_PORT}"
-  else
-    DSH_SERVE_BACKEND="http://127.0.0.1:${DSH_PROXY_PORT}"
-  fi
+if [[ $DSH_TAILSCALE_MODE == serve ]]; then
+  # Self-signed certificate is only trusted inside the tunnel.
+  DSH_SERVE_BACKEND="https+insecure://127.0.0.1:${DSH_PORT}"
   export DSH_SERVE_BACKEND
   tailscale_serve_apply "${DSH_TRUSTED_HOST%%[[:space:]]*}" || fail 'Tailscale Serve was not verified; no success is claimed'
 fi
@@ -355,7 +312,7 @@ if [[ $DSH_ENABLE == yes ]]; then
   verify_unauthenticated_entrypoint "$probe_url" 401 || fail 'unauthenticated base URL was not rejected with 401'
   # 2. The credential URL must redirect, and set a hardened cookie.
   verify_login_redirect "$login_url" 303 || fail 'credential login URL did not answer with a 303 redirect'
-  verify_authenticated_entrypoint "$login_url" "$([[ $DSH_NATIVE_TLS == yes || $DSH_PROXY_SECURE_COOKIES == yes ]] && printf yes || printf no)" \
+  verify_authenticated_entrypoint "$login_url" "$([[ $DSH_NATIVE_TLS == yes ]] && printf yes || printf no)" \
     || fail 'authenticated entrypoint did not satisfy the configured Cookie policy; refusing to claim installation success'
   printf 'entry verification: 401 unauthenticated, 303 login redirect, hardened cookie at %s\n' "$probe_url"
 
@@ -388,7 +345,7 @@ else
   printf 'installed but not started: rerun with DSH_ENABLE=yes to verify the authenticated entrypoint\n'
 fi
 
-printf 'installed %s, mode=%s, unit=%s, user=%s, proxy=%s\n' "$PACKAGE" "$DSH_TAILSCALE_MODE" "$UNIT_NAME" "$DSH_USER" "$DSH_USE_PROXY"
+printf 'installed %s, mode=%s, unit=%s, user=%s\n' "$PACKAGE" "$DSH_TAILSCALE_MODE" "$UNIT_NAME" "$DSH_USER"
 printf 'full login URL is intentionally not written to logs or reports; obtain it in the operator terminal with:\n'
 printf 'sudo node --experimental-strip-types %s/tools/login-url.ts --unit %s --public-url %s\n' "$SCRIPT_DIR" "$UNIT_NAME" "$DSH_PUBLIC_URL"
 if [[ $DSH_NATIVE_TLS == yes ]]; then

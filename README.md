@@ -2,7 +2,7 @@
 
 这是一个可审阅、可重复的通用 Linux VPS 部署工具，固定安装 `@deepseek-ai/dsh@0.2.2-rc.1`，不是 DSH 本体。默认流程是 **原生 TLS + Tailscale Serve 私有 HTTPS**：安装器用 `openssl` 生成 10 年期自签证书，DSH 自己用 `--tls-cert`/`--tls-key` 在 `127.0.0.1:3080` 上跑 HTTPS，Serve 通过 `https+insecure://127.0.0.1:3080` 直连它，**中间没有本机代理**。因为后端本身就是 HTTPS，`DSH_PUBLIC_URL` 为 https 时 DSH 会自己给 Cookie 加 `Secure`，不需要代理补。入口仍受 tailnet ACL/设备接入控制。本流程不会启用 Funnel、开放公网端口或修改防火墙。
 
-旧的 `dsh-web-proxy.service`（127.0.0.1:3081 校验 Host、补 Secure Cookie）保留为**可选回退**，默认不安装、不启用。
+本仓库只提供两种模式：`serve`（原生 TLS，默认）和 `local-only`（回环 + SSH 隧道）。早先的 `dsh-web-proxy.service`（127.0.0.1:3081 校验 Host、补 Secure Cookie）已经从仓库删除；从旧版本升级时安装器会停用并移除残留的 `dsh-web-proxy.service`。
 
 工具不包含任何域名、IP、账号、token、私钥或 API key。
 
@@ -13,7 +13,7 @@
 - Tailscale 必须已登录，tailnet 管理员必须启用 HTTPS/MagicDNS。手机访问前，手机也必须安装 Tailscale 并加入同一 tailnet；浏览器能看到页面不代表手机已接入。
 - DSH 的模型/API 仍需在 Web GUI 的设置中配置。至少选择 DeepSeek provider、填写真实 API 模型配置，并发送一条最小消息确认 assistant 回复；Serve 不会替你配置 API。
 
-这是私有 tailnet 入口，不是公网自动开放方案。默认模式下没有中间代理：TLS 由 DSH 自己终止，Cookie 的 `Secure` 由 DSH 依据 https 的 `DSH_PUBLIC_URL` 自行下发。只有回退到 proxy 模式时代理才会介入，且只绑定 loopback。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
+这是私有 tailnet 入口，不是公网自动开放方案。没有中间代理：TLS 由 DSH 自己终止，Cookie 的 `Secure` 由 DSH 依据 https 的 `DSH_PUBLIC_URL` 自行下发。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
 
 ## 默认安装
 
@@ -23,7 +23,7 @@
 sudo DSH_DRY_RUN=yes ./install.sh
 ```
 
-默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才在独立目录安装 DSH，生成自签证书，只启动 `dsh-web.service`（不再启用 `dsh-web-proxy.service`），并执行：
+默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才在独立目录安装 DSH，生成自签证书，只启动 `dsh-web.service`，并执行：
 
 ```sh
 tailscale serve --bg --https=443 https+insecure://127.0.0.1:3080
@@ -36,7 +36,7 @@ sudo DSH_PUBLIC_URL=https://my-machine.example.ts.net/ \
   DSH_TRUSTED_HOST=my-machine.example.ts.net ./install.sh
 ```
 
-Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本模式的后端（默认 `https+insecure://127.0.0.1:3080`，回退模式为 `http://127.0.0.1:3081`），它会视为已配置；应用失败也不会冒充成功。从旧版本升级时，安装器会停用并移除遗留的 `dsh-web-proxy.service`。
+Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本模式的后端（`https+insecure://127.0.0.1:3080`），它会视为已配置；应用失败也不会冒充成功。从旧版本升级时，安装器会停用并移除遗留的 `dsh-web-proxy.service`（以及它占用的 3081 端口），因为原生 TLS 已经取代它。
 
 ### 安装布局与目录权限
 
@@ -80,29 +80,19 @@ sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 
 这个模式下 DSH 只绑 `127.0.0.1`，所以 `DSH_PUBLIC_URL` 填非回环地址（例如 `https://my-machine.example.ts.net:3082/`）时，安装器**自检探针改用回环地址**（`http://127.0.0.1:${DSH_PORT}/`；原生 TLS 下是 `https://` 并带 `--insecure` 只跳过本机自签证书校验），不会拿不可达的 public URL 去验 401/303/WS。写进 `/etc/dsh/dsh-web.env` 的 `DSH_PUBLIC_URL` 仍是用户给的真实值，只影响自检探针。同时安装器会把 `127.0.0.1` 追加进 `DSH_TRUSTED_HOST`，让 DSH 的 `/api` Host 信任栅栏接受回环探针，避免把健康服务判成 421。
 
-结论：local-only + 非回环 `DSH_PUBLIC_URL` 时安装器退出码为 0，不再误报失败。探针地址由 `tools/probe-url.sh` 决定：`serve`/`serve-proxy` 仍按 public URL 验（那才是浏览器的真实路径），只有 `local-only` 才走回环。
+结论：local-only + 非回环 `DSH_PUBLIC_URL` 时安装器退出码为 0，不再误报失败。探针地址由 `tools/probe-url.sh` 决定：`serve` 按 public URL 验（那才是浏览器的真实路径），只有 `local-only` 才走回环。
 
-`DSH_TAILSCALE_MODE=serve-proxy` 是旧的回退拓扑：DSH 明文跑 3080，本机代理监听 3081 并补 Secure Cookie，Serve 指向 3081。等价简写是 `DSH_TLS_MODE=proxy`。只有在原生 TLS 出问题时才需要它：
+不再提供代理回退模式和自带反代的 `external-proxy` 模式。旧版本的 `dsh-web-proxy.service` 已经删除；想从旧拓扑切回来，直接重跑 `sudo ./install.sh`，残留的代理单元会被停用并移除。
 
-```sh
-sudo DSH_TLS_MODE=proxy ./install.sh
-# 等价于
-sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
-```
+也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
 
-切回默认原生 TLS 直接重跑 `sudo ./install.sh`，代理服务会被停用并移除。
-
-`DSH_TAILSCALE_MODE=external-proxy` 不使用 Tailscale Serve，但安装本机代理；你的 HTTPS 反代应转发到 `http://127.0.0.1:3081`，保留 Host/Origin、WebSocket Upgrade 和挂载路径。注意此模式下 **DSH 不自行下发 Secure**，安装器会实际认证并检查 `Set-Cookie` 同时含 `Secure`、`HttpOnly` 和 `SameSite=Strict`，不满足就失败。
-
-也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_MODE`（`native` 默认 / `proxy`）、`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
-
-通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 资源上限为 `MemoryHigh=512M`、`MemoryMax=768M`、`CPUQuota=75%`、`TasksMax=128`，并启用 `NoNewPrivileges`、`PrivateDevices`、`ProtectSystem=strict`、`ProtectHome`、`ProtectKernelTunables/Modules/Logs` 和空的 `CapabilityBoundingSet`；回退代理为 128M。两者都由独立用户运行。
+通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 资源上限为 `MemoryHigh=512M`、`MemoryMax=768M`、`CPUQuota=75%`、`TasksMax=128`，并启用 `NoNewPrivileges`、`PrivateDevices`、`ProtectSystem=strict`、`ProtectHome`、`ProtectKernelTunables/Modules/Logs` 和空的 `CapabilityBoundingSet`，由独立的服务用户运行。
 
 ## 认证与验证
 
 - `tools/gen-selfsigned-cert.sh`：生成/复用自签证书。目录 `0750`、证书 `0644`、私钥 `0640` 且属主 `root`、组为 DSH 服务用户，SAN 含 MagicDNS 主机名、`localhost` 和 `127.0.0.1`；仍在有效期内且 SAN 匹配时不会重签。
 - `tools/verify-ws.mjs`：对目标做一次真实 WebSocket upgrade 握手，只打印状态码，从不打印 Cookie 值。
-- `tools/probe-url.sh`：决定自检探针地址。`serve`/`serve-proxy`/`external-proxy` 用 `DSH_PUBLIC_URL`（浏览器真实路径），`local-only` 用回环地址；同时决定原生 TLS 下探针是否需要 `--insecure`，以及把 `127.0.0.1` 补进可信主机。
+- `tools/probe-url.sh`：决定自检探针地址。`serve` 用 `DSH_PUBLIC_URL`（浏览器真实路径），`local-only` 用回环地址；同时决定原生 TLS 下探针是否需要 `--insecure`，以及把 `127.0.0.1` 补进可信主机。
 
 安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并做三道真实认证校验：
 
@@ -112,7 +102,7 @@ sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
 
 任一项不符合就退出，不会声称安装成功。随后还会用带登录 Cookie 的请求对**真实外部入口**（`${DSH_PUBLIC_URL}/api/remote.mux`）做一次真正的 upgrade 握手，必须拿到 **101**。这条路径和浏览器一致，同时覆盖了 Serve；自签证书由脚本用 `--insecure` 只跳过本机校验。可用 `DSH_VERIFY_WS=no` 跳过 WS 检查，但不建议。
 
-> 说明：Cookie 是绑定到签发它的主机名的（原生 TLS 下是 `127.0.0.1`，代理回退下是公开的 MagicDNS 名）。因此在 `serve` 模式下检查必须走公开入口，用 loopback 直连且不改 `Host` 会被 DSH 判成未认证；`local-only` 模式没有公开入口可达，探针改为回环 + `127.0.0.1` 可信主机（见「可选模式」）。
+> 说明：Cookie 是绑定到签发它的主机名的。因此在 `serve` 模式下检查必须走公开入口，用 loopback 直连且不改 `Host` 会被 DSH 判成未认证；`local-only` 模式没有公开入口可达，探针改为回环 + `127.0.0.1` 可信主机（见「可选模式」）。
 
 完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
 
@@ -154,14 +144,7 @@ sudo journalctl -u dsh-web.service -b -n 100 --no-pager
 npm test
 ```
 
-只有回退到 `serve-proxy` 时才需要多看 `dsh-web-proxy.service` 和 `:3081`：
-
-```sh
-sudo systemctl status dsh-web-proxy.service
-sudo ss -ltnp | grep ':3081'
-```
-
-`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、proxy 回退仍可用、代理服务默认不启用，以及从旧代理拓扑迁移时只接管属于自己的 Serve handler。`tests/layout-local-only.test.sh` 离线覆盖安装布局（程序在 `$DSH_APP_ROOT/app` 且 root 所有、`WorkingDirectory` 指向 `$DSH_HOME/workspace`、程序目录不在 `ReadWritePaths` 里、`MemoryMax=768M` 不回归）和 local-only 自检（探针地址取回环、只有 loopback 探针才放宽证书校验、`127.0.0.1` 只补一次进可信主机，以及用 mock curl 端到端跑通 401/303/Cookie 且确认探针不会跑到 public URL）。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
+`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 WebSocket 升级校验。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、代理模式已被移除，以及从旧代理拓扑升级时只接管属于自己的 Serve handler。`tests/layout-local-only.test.sh` 离线覆盖安装布局（程序在 `$DSH_APP_ROOT/app` 且 root 所有、`WorkingDirectory` 指向 `$DSH_HOME/workspace`、程序目录不在 `ReadWritePaths` 里、`MemoryMax=768M` 不回归）和 local-only 自检（探针地址取回环、只有 loopback 探针才放宽证书校验、`127.0.0.1` 只补一次进可信主机，以及用 mock curl 端到端跑通 401/303/Cookie 且确认探针不会跑到 public URL）。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
 
 2026-11-06 已在 Ubuntu 24.04 / Node 24.22.1 上完成实装验证：未认证入口 401、带令牌登录 303、Cookie 含 `Secure`/`HttpOnly`/`SameSite=Strict`，对 `https://127.0.0.1:3080/api/remote.mux` 带 Cookie 握手得到 101 升级。
 
@@ -176,7 +159,7 @@ sudo openssl x509 -in /etc/dsh/tls/dsh.crt -noout -ext subjectAltName
 sudo ls -ld /etc/dsh/tls /etc/dsh/tls/dsh.crt /etc/dsh/tls/dsh.key
 # Serve 后端是不是原生 TLS
 sudo tailscale serve status --json
-# 默认模式下 :3081 不应有监听；有监听说明还在旧代理拓扑
+# :3081 不应有监听；有监听说明旧代理单元还在
 sudo ss -ltnp | grep -E ':3080|:3081'
 ```
 

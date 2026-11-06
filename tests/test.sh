@@ -17,11 +17,14 @@ grep -Fq 'PrivateDevices=true' "$root/systemd/dsh-web.service.in"
 grep -Fq 'CapabilityBoundingSet=' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh"
-grep -Fq 'DSH_USE_PROXY=yes' "$root/install.sh"
+# The proxy topology is gone; only the one-off retirement of a stale unit stays.
+! grep -Fq 'DSH_USE_PROXY' "$root/install.sh"
+grep -Fq 'LEGACY_PROXY_UNIT_NAME' "$root/install.sh"
 grep -Fq 'DSH_TLS_CERT' "$root/bin/dsh-web-start.sh"
 grep -Fq 'https+insecure' "$root/install.sh"
-grep -Fq 'DSH_PROXY_PORT' "$root/tools/tailscale-serve.sh"
-grep -Fq 'Secure' "$root/bin/dsh-web-proxy.cjs"
+! grep -RqE 'serve-proxy|external-proxy|DSH_TLS_MODE|DSH_PROXY_PORT' "$root/install.sh"
+! grep -RqE 'DSH_TLS_MODE|DSH_PROXY_PORT' "$root/README.md"
+[[ ! -e $root/bin/dsh-web-proxy.cjs && ! -e $root/systemd/dsh-web-proxy.service.in && ! -e $root/tests/proxy.test.cjs ]]
 grep -Fq 'tailscale_auto_install' "$root/tools/tailscale-serve.sh"
 grep -Fq 'npm install --prefix' "$root/install.sh"
 grep -Fq -- '--bin-links=false' "$root/install.sh"
@@ -58,11 +61,11 @@ case "$1 ${2:-}" in
     case ${TS_CASE:-success} in
       https-off) exit 1;;
       conflict) printf '{"Web":{"https://other":{"Handler":"http://127.0.0.1:9999"}}}';;
-      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"%s"}}}' "${TS_BACKEND:-http://127.0.0.1:3081}";;
+      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"%s"}}}' "${TS_BACKEND:-https+insecure://127.0.0.1:3080}";;
     esac;;
   "funnel status")
     case ${TS_CASE:-success} in
-      funnel-on) printf 'https://dsh.test.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3081\n';;
+      funnel-on) printf 'https://dsh.test.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:9999\n';;
       *) printf 'No serve config\n';;
     esac;;
   "serve --bg")
@@ -76,7 +79,7 @@ chmod +x "$mock"
 run_case() {
   local expected=$1 case_name=$2
   set +e
-  TS_CASE=$case_name DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_preflight" >/dev/null 2>"$tmp/error"
+  TS_CASE=$case_name DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_preflight" >/dev/null 2>"$tmp/error"
   local actual=$?
   set -e
   [[ $actual -eq $expected ]] || { cat "$tmp/error" >&2; return 1; }
@@ -96,7 +99,7 @@ actual=$?
 set -e
 [[ $actual -eq 0 ]] || { cat "$tmp/error" >&2; exit 1; }
 set +e
-TS_CASE=apply-fail DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_serve_apply dsh.test.ts.net" >/dev/null 2>"$tmp/error"
+TS_CASE=apply-fail DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_serve_apply dsh.test.ts.net" >/dev/null 2>"$tmp/error"
 actual=$?
 set -e
 [[ $actual -ne 0 ]] || { cat "$tmp/error" >&2; exit 1; }
@@ -164,11 +167,10 @@ set -e
 [[ $actual -ne 0 ]] || { printf 'expected 200 to be rejected where 303 is required\n' >&2; exit 1; }
 
 if command -v "$node_bin" >/dev/null 2>&1; then
-  "$node_bin" --check "$root/bin/dsh-web-proxy.cjs"
-  "$node_bin" --test "$root/tests/proxy.test.cjs" "$root/tests/verify-ws.test.cjs"
+  "$node_bin" --test "$root/tests/verify-ws.test.cjs"
 else
-  printf 'proxy runtime tests skipped: Node.js is unavailable\n'
+  printf 'websocket verifier runtime tests skipped: Node.js is unavailable\n'
 fi
 bash "$root/tests/native-tls.test.sh"
 bash "$root/tests/layout-local-only.test.sh"
-printf 'static, secure-cookie, 401/303, proxy, native TLS, layout, local-only probe, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
+printf 'static, secure-cookie, 401/303, native TLS, layout, local-only probe, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'

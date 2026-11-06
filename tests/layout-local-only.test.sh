@@ -19,10 +19,9 @@ grep -Fq 'install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_WORKSPACE"' "$
 grep -Fq 'legacy_app="$DSH_HOME/app"' "$root/install.sh" || die 'the legacy program tree is never retired'
 pass 'program, data and workspace directories are separated, legacy tree retired'
 
-for unit in "$root/systemd/dsh-web.service.in" "$root/systemd/dsh-web-proxy.service.in"; do
-  grep -Fq 'WorkingDirectory=@DSH_WORKSPACE@' "$unit" || die "$(basename "$unit") does not run in the workspace"
-  grep -Fq 'ReadWritePaths=@DSH_HOME@' "$unit" || die "$(basename "$unit") lost its writable data path"
-done
+unit="$root/systemd/dsh-web.service.in"
+grep -Fq 'WorkingDirectory=@DSH_WORKSPACE@' "$unit" || die 'the unit does not run in the workspace'
+grep -Fq 'ReadWritePaths=@DSH_HOME@' "$unit" || die 'the unit lost its writable data path' 
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in" || die 'MemoryMax regression'
 grep -Fq 'MemoryHigh=512M' "$root/systemd/dsh-web.service.in" || die 'MemoryHigh regression'
 grep -Fq 'CPUQuota=75%' "$root/systemd/dsh-web.service.in" || die 'CPUQuota regression'
@@ -60,8 +59,6 @@ source "$root/tools/probe-url.sh"
   || die 'local-only probe ignores native TLS'
 [[ $(dsh_probe_url serve 'https://dsh.test.ts.net/' 3080 yes) == 'https://dsh.test.ts.net/' ]] \
   || die 'serve mode should probe the public entrypoint'
-[[ $(dsh_probe_url serve-proxy 'https://dsh.test.ts.net/' 3080 no) == 'https://dsh.test.ts.net/' ]] \
-  || die 'serve-proxy mode should probe the public entrypoint'
 pass 'probe URL follows the mode, not the advertised URL'
 
 [[ $(dsh_probe_insecure local-only yes) == yes ]] || die 'native TLS loopback probe must allow the self-signed cert'

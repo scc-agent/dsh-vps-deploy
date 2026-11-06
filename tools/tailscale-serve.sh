@@ -4,14 +4,15 @@ set -Eeuo pipefail
 
 : "${DSH_TAILSCALE_BIN:=tailscale}"
 : "${DSH_TAILSCALE_PORT:=443}"
-: "${DSH_PROXY_PORT:=3081}"
-# Backend Serve proxies to. Native TLS mode points Serve at the HTTPS listener
-# with https+insecure because the certificate is self-signed.
-: "${DSH_SERVE_BACKEND:=http://127.0.0.1:${DSH_PROXY_PORT}}"
+# Backend Serve proxies to: the native TLS listener, reached with
+# https+insecure because the certificate is self-signed.
+: "${DSH_SERVE_BACKEND:=https+insecure://127.0.0.1:${DSH_PORT:-3080}}"
 # Loopback ports this deployment has used for its own backend. An existing
-# handler pointing at one of them is ours, so a mode migration may replace it;
-# anything else is someone else's service and is never touched.
+# handler pointing at one of them is ours, so an upgrade may replace it;
+# anything else is someone else's service and is never touched. 3081 is the
+# proxy port of the retired topology, kept only so upgrades can take over.
 : "${DSH_SERVE_OWN_PORT:=${DSH_PORT:-3080}}"
+: "${DSH_LEGACY_PROXY_PORT:=3081}"
 
 _ts_json_field() {
   local json=$1 field=$2 value=''
@@ -41,7 +42,7 @@ _ts_owns_handler() {
     [[ -n $backend ]] || continue
     port=$(printf '%s' "$backend" | sed -nE 's#^[a-z+]*://(127\.0\.0\.1|localhost|\[::1\]):([0-9]+).*$#\2#p')
     [[ -n $port ]] || return 1
-    [[ $port == "$DSH_SERVE_OWN_PORT" || $port == "$DSH_PROXY_PORT" ]] || return 1
+    [[ $port == "$DSH_SERVE_OWN_PORT" || $port == "$DSH_LEGACY_PROXY_PORT" ]] || return 1
   done <<< "$backends"
   return 0
 }
@@ -122,8 +123,8 @@ tailscale_serve_apply() {
   local host=$1
   [[ $host != *.invalid ]] || { printf 'error: cannot configure Serve with placeholder hostname %s\n' "$host" >&2; return 26; }
   # --bg changes only the current machine's Serve config; never use funnel.
-  # In native TLS mode the backend is https+insecure because DSH presents a
-  # self-signed certificate that only Tailscale-internal traffic will see.
+  # The backend is https+insecure because DSH presents a self-signed
+  # certificate that only Tailscale-internal traffic will see.
   if ! "$DSH_TAILSCALE_BIN" serve --bg --https="$DSH_TAILSCALE_PORT" "$DSH_SERVE_BACKEND"; then
     printf 'error: Tailscale Serve could not enable HTTPS or install the handler; enable tailnet HTTPS and retry.\n' >&2
     _ts_continue
