@@ -1,0 +1,10 @@
+{
+  "name": "dsh-vps-deploy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Reproducible, loopback-only deployment helpers for DeepSeek Harness 0.2.2-rc.1",
+  "license": "MIT",
+  "engines": { "node": ">=24.9.0" },
+  "type": "module",
+  "scripts": { "test": "bash tests/test.sh" }
+}

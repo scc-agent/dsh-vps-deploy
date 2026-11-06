@@ -1,0 +1,25 @@
+@MARKER@
+[Unit]
+Description=DeepSeek Harness Web UI (pinned 0.2.2-rc.1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@DSH_USER@
+Group=@DSH_USER@
+WorkingDirectory=@DSH_HOME@
+EnvironmentFile=/etc/dsh/dsh-web.env
+ExecStart=/usr/local/libexec/dsh-web-start
+ExecReload=/bin/systemctl restart %N
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DSH_HOME@
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
