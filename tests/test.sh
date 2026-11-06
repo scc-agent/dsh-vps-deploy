@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
-bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/bin/dsh-web-start.sh" "$root/tests/test.sh"
+bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" "$root/bin/dsh-web-start.sh" "$root/tests/test.sh"
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
@@ -67,4 +67,41 @@ actual=$?
 set -e
 [[ $actual -ne 0 ]] || { cat "$tmp/error" >&2; exit 1; }
 
-printf 'static, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
+cat > "$tmp/curl" <<'MOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+header=''
+while (($#)); do
+  case "$1" in
+    --dump-header|-D) header=$2; shift 2;;
+    --write-out|-w) shift 2;;
+    *) shift;;
+  esac
+done
+case ${COOKIE_CASE:-secure} in
+  secure) printf 'Set-Cookie: session=redacted; Secure; HttpOnly; SameSite=Strict\r\n' > "$header";;
+  missing-secure) printf 'Set-Cookie: session=redacted; HttpOnly; SameSite=Strict\r\n' > "$header";;
+  missing-http-only) printf 'Set-Cookie: session=redacted; Secure; SameSite=Strict\r\n' > "$header";;
+  missing-same-site) printf 'Set-Cookie: session=redacted; Secure; HttpOnly\r\n' > "$header";;
+  no-cookie) : > "$header";;
+  *) exit 1;;
+esac
+printf '200'
+MOCK
+chmod +x "$tmp/curl"
+source "$root/tools/verify-auth-cookie.sh"
+run_cookie_case() {
+  local expected=$1 case_name=$2
+  set +e
+  COOKIE_CASE=$case_name PATH="$tmp:$PATH" verify_authenticated_entrypoint 'https://dsh.example.invalid/login?credential=redacted' >/dev/null 2>"$tmp/cookie-error"
+  local actual=$?
+  set -e
+  [[ $actual -eq $expected ]] || { cat "$tmp/cookie-error" >&2; return 1; }
+}
+run_cookie_case 0 secure
+run_cookie_case 1 missing-secure
+run_cookie_case 1 missing-http-only
+run_cookie_case 1 missing-same-site
+run_cookie_case 1 no-cookie
+
+printf 'static, secure-cookie, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'

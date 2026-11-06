@@ -33,6 +33,7 @@ fi
 [[ -r "$SCRIPT_DIR/bin/dsh-web-start.sh" ]] || fail "missing resource: $SCRIPT_DIR/bin/dsh-web-start.sh"
 [[ -r "$SCRIPT_DIR/systemd/dsh-web.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web.service.in"
 [[ -r "$SCRIPT_DIR/tools/tailscale-serve.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/tailscale-serve.sh"
+[[ -r "$SCRIPT_DIR/tools/verify-auth-cookie.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-auth-cookie.sh"
 
 if [[ $DSH_DRY_RUN == yes ]]; then
   printf 'dry-run: mode=%s, resources=%s, unit=%s, no host changes made\n' "$DSH_TAILSCALE_MODE" "$SCRIPT_DIR" "$UNIT_NAME"
@@ -40,6 +41,7 @@ if [[ $DSH_DRY_RUN == yes ]]; then
 fi
 
 source "$SCRIPT_DIR/tools/tailscale-serve.sh"
+source "$SCRIPT_DIR/tools/verify-auth-cookie.sh"
 if [[ $DSH_TAILSCALE_MODE == serve ]]; then
   if ! command -v "$DSH_TAILSCALE_BIN" >/dev/null 2>&1; then
     tailscale_auto_install || exit $?
@@ -121,12 +123,8 @@ if [[ $DSH_ENABLE == yes ]]; then
   # Exercise the real authenticated entrypoint without printing the credential.
   command -v curl >/dev/null || fail 'curl is required to verify the authenticated entrypoint'
   login_url=$(runuser -u "$DSH_USER" -- node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$DSH_PUBLIC_URL" 2>/dev/null) || fail 'could not read the current startup credential; inspect the unit journal and rerun'
-  http_code=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 15 "$login_url") || fail 'authenticated entrypoint request failed'
-  case "$http_code" in
-    2*|3*) ;;
-    *) fail "authenticated entrypoint returned HTTP $http_code";;
-  esac
-  printf 'entry verification: authenticated request succeeded at %s\n' "$DSH_PUBLIC_URL"
+  verify_authenticated_entrypoint "$login_url" || fail 'authenticated entrypoint did not establish a Secure, HttpOnly, SameSite=Strict cookie; refusing to claim installation success'
+  printf 'entry verification: authenticated request and secure cookie succeeded at %s\n' "$DSH_PUBLIC_URL"
 else
   printf 'installed but not started: rerun with DSH_ENABLE=yes to verify the authenticated entrypoint\n'
 fi

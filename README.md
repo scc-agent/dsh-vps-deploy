@@ -11,7 +11,7 @@
 - Tailscale 必须已登录，tailnet 管理员必须启用 HTTPS/MagicDNS。手机访问前，手机也必须安装 Tailscale 并加入同一 tailnet；浏览器能看到页面不代表手机已接入。
 - DSH 的模型/API 仍需在 Web GUI 的设置中配置。至少选择 DeepSeek provider、填写真实 API 模型配置，并发送一条最小消息确认 assistant 回复；Serve 不会替你配置 API。
 
-这是私有 tailnet 入口，不是公网自动开放方案。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
+这是私有 tailnet 入口，不是公网自动开放方案。DSH 在本机始终使用 loopback HTTP 后端；默认由 Tailscale Serve 在外部提供 HTTPS，再转发到该后端。任何自定义反代都必须在外部确保 HTTPS 和安全 cookie 属性，不能把默认 HTTP 后端称为完全开箱即用方案。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
 
 ## 默认安装
 
@@ -57,7 +57,7 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 ```
 
-`DSH_TAILSCALE_MODE=external-proxy` 保留现有反代方式。外部反代必须使用 HTTPS，保留浏览器的 Host/Origin、WebSocket Upgrade，并正确处理挂载路径和 cookie Path。
+`DSH_TAILSCALE_MODE=external-proxy` 保留现有反代方式。外部反代必须使用 HTTPS，保留浏览器的 Host/Origin、WebSocket Upgrade，并正确处理挂载路径和 cookie Path。安装器首次实际认证会检查响应的 `Set-Cookie` 是否同时包含 `Secure`、`HttpOnly` 和 `SameSite=Strict`；缺任何属性都会失败并且不报告安装成功。HTTP 反代不能通过这项验证，除非它前面有真正提供 HTTPS 且不丢失这些属性的安全代理。
 
 `DSH_TAILSCALE_MODE=native-tls` 让 DSH 自己使用同时提供的 `DSH_TLS_CERT`/`DSH_TLS_KEY`。证书必须是匹配的可读 PEM 文件，且 `DSH_PUBLIC_URL` 必须是 HTTPS。该模式不由 Tailscale Serve 管理。
 
@@ -67,7 +67,7 @@ sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 
 - `tools/rotate-native-tls.sh`：校验证书、私钥及公钥匹配后，原子替换同目录文件并只 reload `dsh-web.service`。
 
-安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并通过实际入口发起一次认证 URL 请求；失败就退出，不会声称成功。完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
+安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并通过实际入口发起一次认证 URL 请求；它会检查响应是否设置同时包含 `Secure`、`HttpOnly`、`SameSite=Strict` 的 cookie。状态码、cookie 或任一属性不符合要求都会退出，不会声称安装成功。完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
 
 ```sh
 sudo -u dsh node --experimental-strip-types \
