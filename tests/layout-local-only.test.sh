@@ -22,10 +22,12 @@ pass 'program, data and workspace directories are separated, legacy tree retired
 unit="$root/systemd/dsh-web.service.in"
 grep -Fq 'WorkingDirectory=@DSH_WORKSPACE@' "$unit" || die 'the unit does not run in the workspace'
 grep -Fq 'ReadWritePaths=@DSH_HOME@' "$unit" || die 'the unit lost its writable data path' 
-grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in" || die 'MemoryMax regression'
-grep -Fq 'MemoryHigh=512M' "$root/systemd/dsh-web.service.in" || die 'MemoryHigh regression'
-grep -Fq 'CPUQuota=75%' "$root/systemd/dsh-web.service.in" || die 'CPUQuota regression'
-grep -Fq 'TasksMax=128' "$root/systemd/dsh-web.service.in" || die 'TasksMax regression'
+grep -Fq 'MemoryMax=@DSH_MEMORY_MAX@' "$root/systemd/dsh-web.service.in" || die 'MemoryMax placeholder lost'
+grep -Fq 'DSH_MEMORY_MAX:=768M' "$root/install.sh" || die 'MemoryMax default changed'
+grep -Fq 'MemoryHigh=@DSH_MEMORY_HIGH@' "$root/systemd/dsh-web.service.in" || die 'MemoryHigh placeholder lost'
+grep -Fq 'DSH_MEMORY_HIGH:=512M' "$root/install.sh" || die 'MemoryHigh default changed'
+grep -Fq 'CPUQuota=@DSH_CPU_QUOTA@' "$root/systemd/dsh-web.service.in" || die 'CPUQuota placeholder lost'
+grep -Fq 'TasksMax=@DSH_TASKS_MAX@' "$root/systemd/dsh-web.service.in" || die 'TasksMax placeholder lost'
 grep -Fq 'PrivateDevices=true' "$root/systemd/dsh-web.service.in" || die 'PrivateDevices regression'
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in" || die 'NoNewPrivileges regression'
 grep -Fq 'unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}' "$root/install.sh" \
@@ -85,7 +87,8 @@ grep -Fq '$SCRIPT_DIR/tools/probe-url.sh' "$root/install.sh" \
   || die 'probe-url.sh is missing from the installer resource checks'
 grep -Fq 'DSH_TRUSTED_HOST=$(ensure_trusted_loopback "$DSH_TRUSTED_HOST")' "$root/install.sh" \
   || die 'local-only does not trust the loopback authority'
-grep -Fq 'DSH_PUBLIC_URL=%q' "$root/install.sh" || die 'the advertised URL is no longer written to the env file'
+grep -Fq 'env_line DSH_PUBLIC_URL "$DSH_PUBLIC_URL"' "$root/install.sh" \
+  || die 'the advertised URL is no longer written to the env file'
 pass 'the self-check probes loopback while DSH keeps the real public URL'
 
 # --- end to end with a mock curl -------------------------------------------

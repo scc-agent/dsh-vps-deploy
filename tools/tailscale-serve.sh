@@ -31,8 +31,19 @@ _ts_continue() {
   printf 'continue: sudo DSH_TAILSCALE_MODE=serve DSH_TAILSCALE_INSTALL=yes ./install.sh\n' >&2
 }
 
+# Count the backends named in a Serve status document. Real output is
+# {"Web":{"host:443":{"Handlers":{"/":{"Proxy":"…"}}}}}; older shapes use
+# "Handler". Only keys that carry a backend value are counted.
+_ts_handler_count() {
+  local status=$1 count
+  count=$(printf '%s' "$status" |
+    grep -oE '"(Proxy|Handler)"[[:space:]]*:[[:space:]]*"[^"]+"' |
+    wc -l | tr -d ' ')
+  printf '%s' "${count:-0}"
+}
+
 # True when every backend URL in the Serve config points at a loopback port that
-# belongs to this deployment (the native TLS port or the legacy proxy port).
+# belongs to this deployment's own listener.
 _ts_owns_handler() {
   local status=$1 backends backend port
   # Real serve status uses "Proxy"; tolerate "Handler" from older/mocked shapes.
@@ -93,8 +104,10 @@ tailscale_preflight() {
   # at one of this deployment's own loopback ports. Never reset or replace
   # another service's handler.
   if [[ -n $serve_status && $serve_status != '{}' && $serve_status != 'null' ]]; then
-    if ! _ts_owns_handler "$serve_status" ||
-       [[ $(printf '%s' "$serve_status" | grep -o '"Handler"' | wc -l) -gt 1 ]]; then
+    # Real status nests backends under Web.<host>.Handlers as {"/": {"Proxy": …}}.
+    # Count every backend that is actually named, so more than one handler under
+    # any host means someone else (or a stale route of ours) is also being served.
+    if ! _ts_owns_handler "$serve_status" || [[ $(_ts_handler_count "$serve_status") -gt 1 ]]; then
       printf 'error: Tailscale Serve already has a different handler; refusing to overwrite it.\n' >&2
       printf 'inspect with: sudo tailscale serve status --json\n' >&2
       _ts_continue

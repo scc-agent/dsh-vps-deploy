@@ -17,9 +17,15 @@ gen_selfsigned_cert "$cert_dir" vps.test.ts.net root 2>/dev/null || die 'certifi
 pass 'generates a self-signed certificate pair'
 
 [[ $(stat -c '%a' "$cert_dir") == 750 ]] || die "cert dir mode $(stat -c '%a' "$cert_dir") != 750"
-[[ $(stat -c '%U' "$cert_dir") == root ]] || die 'cert dir is not owned by root'
-[[ $(stat -c '%G' "$cert_dir") == root ]] || die 'cert dir group should follow the service group'
-[[ $(stat -c '%U' "$cert_dir/dsh.key") == root ]] || die 'private key is not owned by root'
+if [[ $EUID -eq 0 ]]; then
+  # Ownership is only assertable when the suite itself runs as root; the mode
+  # bits below are checked in both cases.
+  [[ $(stat -c '%U' "$cert_dir") == root ]] || die 'cert dir is not owned by root'
+  [[ $(stat -c '%G' "$cert_dir") == root ]] || die 'cert dir group should follow the service group'
+  [[ $(stat -c '%U' "$cert_dir/dsh.key") == root ]] || die 'private key is not owned by root'
+else
+  printf 'skip - ownership assertions need root\n' >&2
+fi
 [[ $(stat -c '%a' "$cert_dir/dsh.key") == 640 ]] || die 'private key is not 0640'
 [[ $(stat -c '%a' "$cert_dir/dsh.crt") == 644 ]] || die 'certificate is not 0644'
 pass 'applies minimal certificate permissions (dir 0750, key 0640)'
@@ -71,7 +77,7 @@ case "$1 ${2:-}" in
 esac
 MOCK
 chmod +x "$mock"
-printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"BACKEND"}}}' > "$work/status.template"
+printf '{"Web":{"dsh.test.ts.net:443":{"Handlers":{"/":{"Proxy":"BACKEND"}}}}}' > "$work/status.template"
 
 run_serve() {
   local backend=$1

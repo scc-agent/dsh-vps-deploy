@@ -6,13 +6,17 @@ bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-
   "$root/tools/gen-selfsigned-cert.sh" "$root/tools/probe-url.sh" \
   "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" \
   "$root/tests/test.sh" "$root/tests/native-tls.test.sh" "$root/tests/layout-local-only.test.sh"
+
+# The env file is parsed by systemd, not bash: %q quoting would leak bash syntax.
+! grep -Fq "printf 'DSH_BIN=%q" "$root/install.sh" || { printf 'env file still uses bash %q quoting\n' >&2; exit 1; }
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
-grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
-grep -Fq 'MemoryHigh=512M' "$root/systemd/dsh-web.service.in"
-grep -Fq 'CPUQuota=75%' "$root/systemd/dsh-web.service.in"
-grep -Fq 'TasksMax=128' "$root/systemd/dsh-web.service.in"
+grep -Fq 'MemoryMax=@DSH_MEMORY_MAX@' "$root/systemd/dsh-web.service.in"
+grep -Fq 'MemoryHigh=@DSH_MEMORY_HIGH@' "$root/systemd/dsh-web.service.in"
+grep -Fq 'CPUQuota=@DSH_CPU_QUOTA@' "$root/systemd/dsh-web.service.in"
+grep -Fq 'TasksMax=@DSH_TASKS_MAX@' "$root/systemd/dsh-web.service.in"
+grep -Fq 'DSH_MEMORY_MAX:=768M' "$root/install.sh"
 grep -Fq 'PrivateDevices=true' "$root/systemd/dsh-web.service.in"
 grep -Fq 'CapabilityBoundingSet=' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
@@ -34,7 +38,6 @@ grep -Fq 'DSH_ENTRYPOINT' "$root/bin/dsh-cli.sh"
 ! grep -RqE '(^|[^[:alnum:]_])(bash|sh|source)[[:space:]]+"?\$root/install\.sh' "$root/tests/native-tls.test.sh" \
   "$root/tests/layout-local-only.test.sh" \
   || { printf 'refusing to run: a test executes install.sh\n' >&2; exit 1; }
-grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 ! grep -RniE 'curl[^\n]*\|[[:space:]]*sh|tailscale[[:space:]]+funnel' "$root/install.sh" "$root/bin" "$root/systemd"
 
 if ! command -v "$node_bin" >/dev/null 2>&1; then
@@ -60,8 +63,9 @@ case "$1 ${2:-}" in
   "serve status")
     case ${TS_CASE:-success} in
       https-off) exit 1;;
-      conflict) printf '{"Web":{"https://other":{"Handler":"http://127.0.0.1:9999"}}}';;
-      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"%s"}}}' "${TS_BACKEND:-https+insecure://127.0.0.1:3080}";;
+      conflict) printf '{"Web":{"dsh.test.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9999"}}}}}';;
+      multi) printf '{"Web":{"dsh.test.ts.net:443":{"Handlers":{"/":{"Proxy":"%s"},"/other":{"Proxy":"%s"}}}}}' "${TS_BACKEND:-https+insecure://127.0.0.1:3080}" "${TS_BACKEND:-https+insecure://127.0.0.1:3080}";;
+      *) printf '{"Web":{"dsh.test.ts.net:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "${TS_BACKEND:-https+insecure://127.0.0.1:3080}";;
     esac;;
   "funnel status")
     case ${TS_CASE:-success} in
@@ -87,6 +91,7 @@ run_case() {
 run_case 21 unauth
 run_case 22 https-off
 run_case 24 conflict
+run_case 24 multi
 run_case 23 funnel-on
 run_case 0 success
 run_case 0 success # repeated configuration is accepted when it is already ours

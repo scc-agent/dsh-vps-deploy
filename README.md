@@ -55,6 +55,14 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 - agent 的默认工作区是 `/var/lib/dsh/workspace`，不是家目录本身，所以在工作区里列不出 `.dsh` 以外的目录布局，更碰不到 `/opt/dsh/app`。
 - 升级时安装器在 `/opt/dsh/.app.stage.<pid>` 装新树、原子换入、再强制 `chown -R root:root`，旧树在换入后才删。
 
+**这条边界的真实范围（重要）**：上面挡住的是"agent 改写自己的程序"，不是"agent 拿不到 DSH 的秘密"。agent 与服务跑在同一个 `dsh` 用户下，所以它**读得到**：
+
+- `$DSH_HOME/.dsh` 里的凭据与会话（例如 `.credentials.yaml`，`0600` 但属主就是 `dsh`）
+- `/etc/dsh/tls/dsh.key`（`0640 root:dsh`，组是服务用户，可读）
+- `/etc/dsh/dsh-web.env`
+
+这是"agent 与服务同用户"的结构性结果，不是配置遗漏。真要隔离 agent 与服务自身的凭据，需要拆成两个用户再加 namespace/沙箱，是另一个量级的改造；本工具没有做，也不会暗示已经做了。
+
 程序位置可用 `DSH_APP_ROOT`（默认 `/opt/dsh`）覆盖，工作区始终是 `$DSH_HOME/workspace`。
 
 ### 缺失、未登录或 HTTPS 未启用

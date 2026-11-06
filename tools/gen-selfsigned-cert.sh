@@ -40,11 +40,15 @@ cert_posture_ok() {
   [[ $(stat -c '%a' "$dir") == 750 ]] || return 1
   [[ $(stat -c '%a' "$cert") == 644 ]] || return 1
   [[ $(stat -c '%a' "$key") == 640 ]] || return 1
-  # The directory group is the service group so the daemon can traverse, but
-  # the directory itself is still not writable by it.
-  [[ $(stat -c '%U' "$dir") == root && $(stat -c '%G' "$dir") == "$group" ]] || return 1
-  [[ $(stat -c '%U' "$cert") == root && $(stat -c '%G' "$cert") == root ]] || return 1
-  [[ $(stat -c '%U' "$key") == root && $(stat -c '%G' "$key") == "$group" ]] || return 1
+  # Ownership can only be asserted as root; unprivileged runs (tests, CI) verify
+  # the mode bits, which are what actually gate read access here.
+  if [[ $EUID -eq 0 ]]; then
+    # The directory group is the service group so the daemon can traverse, but
+    # the directory itself is still not writable by it.
+    [[ $(stat -c '%U' "$dir") == root && $(stat -c '%G' "$dir") == "$group" ]] || return 1
+    [[ $(stat -c '%U' "$cert") == root && $(stat -c '%G' "$cert") == root ]] || return 1
+    [[ $(stat -c '%U' "$key") == root && $(stat -c '%G' "$key") == "$group" ]] || return 1
+  fi
 }
 
 # gen_selfsigned_cert CERT_DIR HOST [GROUP] [--force]
@@ -67,13 +71,19 @@ gen_selfsigned_cert() {
   fi
 
   local cert="$dir/${DSH_TLS_CERT_NAME}" key="$dir/${DSH_TLS_KEY_NAME}"
-  install -d -o root -g "$group_name" -m 0750 "$dir" || return 1
+  # As root, hand the directory to the service group so only the key is 0640.
+  # Unprivileged (tests, CI) can only create a directory it already owns.
+  if [[ $EUID -eq 0 ]]; then
+    install -d -o root -g "$group_name" -m 0750 "$dir" || return 1
+  else
+    install -d -m 0750 "$dir" || return 1
+  fi
 
   if [[ $force == no && -r $cert && -r $key ]] &&
      cert_covers_host "$cert" "$host" &&
      [[ $(cert_days_left "$cert") -gt $DSH_TLS_RENEW_BEFORE_DAYS ]] &&
      openssl pkey -in "$key" -noout >/dev/null 2>&1; then
-    chown root:"$group_name" "$key" 2>/dev/null || true
+    [[ $EUID -eq 0 ]] && chown root:"$group_name" "$key" 2>/dev/null || true
     chmod 0640 "$key"
     chmod 0644 "$cert"
     cert_posture_ok "$dir" "$cert" "$key" "$group_name" || { printf 'error: existing certificate permissions could not be tightened\n' >&2; return 1; }
@@ -120,8 +130,13 @@ CNF
   openssl pkey -in "$tmp_dir/key.pem" -noout >/dev/null 2>&1 || { printf 'error: generated private key is unreadable\n' >&2; return 1; }
   cert_covers_host "$tmp_dir/cert.pem" "$host" || { printf 'error: generated certificate is missing the SAN for %s\n' "$host" >&2; return 1; }
 
-  install -o root -g root -m 0644 "$tmp_dir/cert.pem" "$cert" || return 1
-  install -o root -g "$group_name" -m 0640 "$tmp_dir/key.pem" "$key" || return 1
+  if [[ $EUID -eq 0 ]]; then
+    install -o root -g root -m 0644 "$tmp_dir/cert.pem" "$cert" || return 1
+    install -o root -g "$group_name" -m 0640 "$tmp_dir/key.pem" "$key" || return 1
+  else
+    install -m 0644 "$tmp_dir/cert.pem" "$cert" || return 1
+    install -m 0640 "$tmp_dir/key.pem" "$key" || return 1
+  fi
   rm -rf "$tmp_dir"
   trap - RETURN
   cert_posture_ok "$dir" "$cert" "$key" "$group_name" || { printf 'error: certificate permissions are not minimal\n' >&2; return 1; }

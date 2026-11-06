@@ -28,6 +28,13 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${DSH_DRY_RUN:=no}"
 : "${DSH_TAILSCALE_INSTALL:=no}"
 : "${DSH_VERIFY_WS:=yes}"
+# Resource ceilings for the DSH unit. Sized for a 2 GiB VPS running one agent:
+# measured peak is ~330 MiB, so MemoryMax leaves headroom for a big turn while
+# still capping a runaway. Raise them for heavy builds.
+: "${DSH_MEMORY_HIGH:=512M}"
+: "${DSH_MEMORY_MAX:=768M}"
+: "${DSH_CPU_QUOTA:=75%}"
+: "${DSH_TASKS_MAX:=128}"
 readonly DSH_WS_PATH='/api/remote.mux'
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -59,7 +66,11 @@ Variables:
 USAGE
   exit 0
 fi
-[[ $EUID -eq 0 ]] || fail 'run as root (for example: sudo ./install.sh)'
+# A dry run only reads inputs and resources; it must stay usable for unprivileged
+# operators and CI, so the privilege check comes after the dry-run exit.
+if [[ $DSH_DRY_RUN != yes ]]; then
+  [[ $EUID -eq 0 ]] || fail 'run as root (for example: sudo ./install.sh)'
+fi
 [[ $DSH_PORT =~ ^[0-9]+$ && $DSH_PORT -ge 1 && $DSH_PORT -le 65535 ]] || fail 'DSH_PORT must be 1..65535'
 [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == local-only ]] || fail 'DSH_TAILSCALE_MODE must be serve or local-only'
 [[ $DSH_DRY_RUN == yes || $DSH_DRY_RUN == no ]] || fail 'DSH_DRY_RUN must be yes or no'
@@ -177,19 +188,28 @@ if [[ $DSH_NATIVE_TLS == yes ]]; then
   fi
 fi
 
-npm_integrity="$(npm view "$PACKAGE" dist.integrity --registry=https://registry.npmjs.org)"
-[[ $npm_integrity == "$EXPECTED_INTEGRITY" ]] || fail "npm integrity mismatch for $PACKAGE"
+# Fetch the exact tarball once, verify its digest locally, then install from that
+# file. Comparing a separately-queried "npm view dist.integrity" would not bind
+# the check to the bytes actually installed (TOCTOU).
+pkg_tmp=$(mktemp -d)
+trap 'rm -rf "$pkg_tmp"' EXIT
+npm pack "$PACKAGE" --pack-destination "$pkg_tmp" --registry=https://registry.npmjs.org >/dev/null \
+  || fail "could not download $PACKAGE"
+pkg_tarball=$(find "$pkg_tmp" -maxdepth 1 -name '*.tgz' -print -quit)
+[[ -n $pkg_tarball ]] || fail "npm pack produced no tarball for $PACKAGE"
+pkg_integrity="sha512-$(openssl dgst -sha512 -binary "$pkg_tarball" | openssl base64 -A)"
+[[ $pkg_integrity == "$EXPECTED_INTEGRITY" ]] || fail "tarball integrity mismatch for $PACKAGE"
 # Install into a fresh staging tree under the program root and swap it in: npm
 # cannot reliably rewrite an existing node_modules, and a half-updated tree is
 # worse than none. The tree stays root-owned, so the service user can only read
 # it (and the agent, whose workspace is $DSH_WORKSPACE, cannot see it at all).
 app_stage="$DSH_APP_ROOT/.app.stage.$$"
 app_previous="$DSH_APP_ROOT/.app.previous.$$"
-cleanup_app_stage() { rm -rf "$app_stage" "$app_previous"; }
+cleanup_app_stage() { rm -rf "$app_stage" "$app_previous" "$pkg_tmp"; }
 trap cleanup_app_stage EXIT
 rm -rf "$app_stage" "$app_previous"
 install -d -o root -g root -m 0755 "$app_stage"
-npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false "$PACKAGE"
+npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false "$pkg_tarball"
 STAGED_ENTRYPOINT="$app_stage/node_modules/@deepseek-ai/dsh/lib/bin.js"
 [[ -r $STAGED_ENTRYPOINT ]] || fail 'DSH entrypoint was not found in the staged installation'
 if [[ -d $DSH_APP_DIR ]]; then mv "$DSH_APP_DIR" "$app_previous"; fi
@@ -235,21 +255,35 @@ unit_template=${unit_template//@DSH_USER@/$DSH_USER}
 unit_template=${unit_template//@DSH_HOME@/$DSH_HOME}
 unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
 unit_template=${unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
+unit_template=${unit_template//@DSH_MEMORY_HIGH@/$DSH_MEMORY_HIGH}
+unit_template=${unit_template//@DSH_MEMORY_MAX@/$DSH_MEMORY_MAX}
+unit_template=${unit_template//@DSH_CPU_QUOTA@/$DSH_CPU_QUOTA}
+unit_template=${unit_template//@DSH_TASKS_MAX@/$DSH_TASKS_MAX}
 printf '%s\n' "$unit_template" | install -m 0644 /dev/stdin "$unit_path"
 
 # Write secrets/config atomically; the env file is never world-readable.
+# systemd's EnvironmentFile is not bash: a bare value may contain spaces, but a
+# backslash, quote or $ must be escaped, and %q would emit bash-only quoting.
+env_escape() {
+  local v=$1
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  v=${v//\$/\\$}
+  printf '%s' "$v"
+}
+env_line() { printf '%s=%s\n' "$1" "$(env_escape "$2")"; }
 env_tmp=$(mktemp /etc/dsh/dsh-web.env.XXXXXX)
 trap 'rm -f "$env_tmp"' EXIT
 {
-  printf 'DSH_BIN=%q\n' "$DSH_BIN"
-  printf 'DSH_NODE=%q\n' "$(command -v node)"
-  printf 'DSH_ENTRYPOINT=%q\n' "$DSH_ENTRYPOINT"
-  printf 'DSH_PUBLIC_URL=%q\n' "$DSH_PUBLIC_URL"
-  printf 'DSH_TRUSTED_HOST=%q\n' "$DSH_TRUSTED_HOST"
-  printf 'DSH_PORT=%q\n' "$DSH_PORT"
-  printf 'DSH_TAILSCALE_MODE=%q\n' "$DSH_TAILSCALE_MODE"
-  printf 'DSH_TLS_CERT=%q\n' "$DSH_TLS_CERT"
-  printf 'DSH_TLS_KEY=%q\n' "$DSH_TLS_KEY"
+  env_line DSH_BIN "$DSH_BIN"
+  env_line DSH_NODE "$(command -v node)"
+  env_line DSH_ENTRYPOINT "$DSH_ENTRYPOINT"
+  env_line DSH_PUBLIC_URL "$DSH_PUBLIC_URL"
+  env_line DSH_TRUSTED_HOST "$DSH_TRUSTED_HOST"
+  env_line DSH_PORT "$DSH_PORT"
+  env_line DSH_TAILSCALE_MODE "$DSH_TAILSCALE_MODE"
+  env_line DSH_TLS_CERT "$DSH_TLS_CERT"
+  env_line DSH_TLS_KEY "$DSH_TLS_KEY"
 } > "$env_tmp"
 chown root:"$DSH_USER" "$env_tmp"
 chmod 0640 "$env_tmp"
