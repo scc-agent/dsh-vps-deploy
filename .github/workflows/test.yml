@@ -1,0 +1,25 @@
+---
+# Offline test suite only. The runner is unprivileged, which is exactly what the
+# suite must support: install.sh in dry-run mode, and every tool check, must pass
+# without root. What this does NOT cover: loading the real unit in systemd,
+# a live systemctl/Tailscale, or an end-to-end handshake against a running DSH.
+# A green run means the logic is sound, not that a deployment is healthy.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # package.json engines: >=24.9.0, and install.sh enforces the same floor.
+          node-version: '24'
+      - run: npm test
