@@ -6,6 +6,7 @@ readonly PACKAGE="@deepseek-ai/dsh@${VERSION}"
 readonly EXPECTED_INTEGRITY='sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg=='
 readonly UNIT_NAME='dsh-web.service'
 readonly MARKER='# Managed by dsh-vps-deploy; review before changing.'
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${DSH_USER:=dsh}"
 : "${DSH_HOME:=/var/lib/dsh}"
@@ -15,20 +16,30 @@ readonly MARKER='# Managed by dsh-vps-deploy; review before changing.'
 : "${DSH_TRUSTED_HOST:=dsh.example.invalid}"
 : "${DSH_TLS_CERT:=}"
 : "${DSH_TLS_KEY:=}"
+: "${DSH_DRY_RUN:=no}"
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail 'run as root (for example: sudo ./install.sh)'
-command -v node >/dev/null || fail 'Node.js is required (>= 24.9.0)'
-command -v npm >/dev/null || fail 'npm is required'
-command -v systemctl >/dev/null || fail 'systemd is required'
-node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a<24 || (a===24 && b<9)) process.exit(1)' || fail 'Node.js >= 24.9.0 is required'
 [[ $DSH_PORT =~ ^[0-9]+$ && $DSH_PORT -ge 1 && $DSH_PORT -le 65535 ]] || fail 'DSH_PORT must be 1..65535'
 [[ $DSH_PUBLIC_URL == https://* || $DSH_PUBLIC_URL == http://* ]] || fail 'DSH_PUBLIC_URL must be an http(s) URL'
 [[ -n $DSH_TRUSTED_HOST ]] || fail 'DSH_TRUSTED_HOST is required'
+[[ $DSH_DRY_RUN == yes || $DSH_DRY_RUN == no ]] || fail 'DSH_DRY_RUN must be yes or no'
 if [[ -n $DSH_TLS_CERT || -n $DSH_TLS_KEY ]]; then
   [[ -n $DSH_TLS_CERT && -n $DSH_TLS_KEY ]] || fail 'DSH_TLS_CERT and DSH_TLS_KEY must be provided together'
   [[ -r $DSH_TLS_CERT && -r $DSH_TLS_KEY ]] || fail 'TLS files must exist and be readable before installation'
 fi
+[[ -r "$SCRIPT_DIR/bin/dsh-web-start.sh" ]] || fail "missing resource: $SCRIPT_DIR/bin/dsh-web-start.sh"
+[[ -r "$SCRIPT_DIR/systemd/dsh-web.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web.service.in"
+
+if [[ $DSH_DRY_RUN == yes ]]; then
+  printf 'dry-run: resources=%s, unit=%s, no host changes made\n' "$SCRIPT_DIR" "$UNIT_NAME"
+  exit 0
+fi
+
+command -v node >/dev/null || fail 'Node.js is required (>= 24.9.0)'
+command -v npm >/dev/null || fail 'npm is required'
+command -v systemctl >/dev/null || fail 'systemd is required'
+node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a<24 || (a===24 && b<9)) process.exit(1)' || fail 'Node.js >= 24.9.0 is required'
 
 if ! id "$DSH_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DSH_HOME" --create-home --shell /usr/sbin/nologin "$DSH_USER"
@@ -47,12 +58,18 @@ if [[ -e /etc/systemd/system/$UNIT_NAME ]] && ! grep -Fqx "$MARKER" /etc/systemd
 fi
 
 install -d -m 0755 /usr/local/libexec
-sed -e "s|@DSH_BIN@|$DSH_BIN|g" > /usr/local/libexec/dsh-web-start < bin/dsh-web-start.sh
+start_template=$(<"$SCRIPT_DIR/bin/dsh-web-start.sh")
+start_template=${start_template//@DSH_BIN@/$DSH_BIN}
+printf '%s\n' "$start_template" > /usr/local/libexec/dsh-web-start
 chmod 0755 /usr/local/libexec/dsh-web-start
 
-install -m 0644 systemd/dsh-web.service.in /tmp/dsh-web.service.in
-sed -e "s|@MARKER@|$MARKER|g" -e "s|@DSH_USER@|$DSH_USER|g" -e "s|@DSH_HOME@|$DSH_HOME|g" -e "s|@DSH_BIN@|$DSH_BIN|g" -e "s|@DSH_PORT@|$DSH_PORT|g" > /etc/systemd/system/$UNIT_NAME < /tmp/dsh-web.service.in
-rm -f /tmp/dsh-web.service.in
+unit_template=$(<"$SCRIPT_DIR/systemd/dsh-web.service.in")
+unit_template=${unit_template//@MARKER@/$MARKER}
+unit_template=${unit_template//@DSH_USER@/$DSH_USER}
+unit_template=${unit_template//@DSH_HOME@/$DSH_HOME}
+unit_template=${unit_template//@DSH_BIN@/$DSH_BIN}
+unit_template=${unit_template//@DSH_PORT@/$DSH_PORT}
+printf '%s\n' "$unit_template" > "/etc/systemd/system/$UNIT_NAME"
 
 {
   printf 'DSH_BIN=%q\n' "$DSH_BIN"
