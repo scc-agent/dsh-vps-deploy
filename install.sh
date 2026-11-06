@@ -307,8 +307,9 @@ if [[ $DSH_ENABLE == yes ]]; then
     curl_args=(--silent --show-error --output /dev/null --max-time 15 -c "$jar")
     [[ $DSH_NATIVE_TLS == yes ]] && curl_args+=(--insecure)
     curl "${curl_args[@]}" "$local_login" >/dev/null 2>&1 || true
-    if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" \
-        --host "$DSH_TRUSTED_HOST" --insecure; then
+    # No Host override: the login cookie is issued for the loopback host, so the
+    # upgrade must present that same host to be authenticated.
+    if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" --insecure; then
       rm -f "$jar"
       printf 'websocket verification: upgrade handshake returned 101 with an authenticated cookie\n'
     else

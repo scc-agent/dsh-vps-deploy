@@ -125,6 +125,12 @@ set -e
 [[ $pathed -eq 0 ]] || die 'installer does not derive the loopback login path'
 pass 'installer derives the loopback login path from the credential URL'
 
+# The login cookie is scoped to the loopback host, so the upgrade request must
+# not pretend to be the public host or DSH rejects it as unauthenticated.
+! grep -Fq -- '--host "$DSH_TRUSTED_HOST"' "$root/install.sh" \
+  || die 'websocket check overrides Host and would lose the loopback-scoped cookie'
+pass 'websocket check keeps the loopback host that the cookie was issued for'
+
 # --- installer defaults ------------------------------------------------------
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh" || die 'default mode is not serve'
 grep -Fq 'DSH_TLS_MODE:=native' "$root/install.sh" || die 'native TLS is not the default TLS mode'
