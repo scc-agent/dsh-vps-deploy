@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
-bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" "$root/bin/dsh-web-start.sh" "$root/tests/test.sh"
+bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" "$root/tests/test.sh"
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
@@ -10,6 +10,10 @@ grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh"
 grep -Fq 'tailscale_auto_install' "$root/tools/tailscale-serve.sh"
+grep -Fq 'npm install --prefix' "$root/install.sh"
+grep -Fq -- '--bin-links=false' "$root/install.sh"
+grep -Fq 'DSH_ENTRYPOINT' "$root/bin/dsh-cli.sh"
+! grep -Fq 'npm install --global' "$root/install.sh"
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 ! grep -RniE 'curl[^\n]*\|[[:space:]]*sh|tailscale[[:space:]]+funnel' "$root/install.sh" "$root/bin" "$root/systemd"
 
@@ -39,7 +43,11 @@ case "$1 ${2:-}" in
       conflict) printf '{"Web":{"https://other":{"Handler":"http://127.0.0.1:9999"}}}';;
       *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"http://127.0.0.1:3080"}}}';;
     esac;;
-  "funnel status") exit 1;;
+  "funnel status")
+    case ${TS_CASE:-success} in
+      funnel-on) printf 'https://dsh.test.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3080\n';;
+      *) printf 'No serve config\n';;
+    esac;;
   "serve --bg")
     [[ ${TS_CASE:-success} != apply-fail ]] || exit 1
     printf 'configured\n';;
@@ -59,6 +67,7 @@ run_case() {
 run_case 21 unauth
 run_case 22 https-off
 run_case 24 conflict
+run_case 23 funnel-on
 run_case 0 success
 run_case 0 success # repeated configuration is accepted when it is already ours
 set +e

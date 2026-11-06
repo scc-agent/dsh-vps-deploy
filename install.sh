@@ -77,15 +77,19 @@ install -d -o "$DSH_USER" -g "$DSH_USER" -m 0750 "$DSH_HOME"
 install -d -o root -g root -m 0750 /etc/dsh
 npm_integrity="$(npm view "$PACKAGE" dist.integrity --registry=https://registry.npmjs.org)"
 [[ $npm_integrity == "$EXPECTED_INTEGRITY" ]] || fail "npm integrity mismatch for $PACKAGE"
-npm install --global --omit=dev --ignore-scripts "$PACKAGE"
-DSH_BIN="$(command -v dsh || true)"
-[[ -x $DSH_BIN ]] || fail 'dsh was not found after npm installation'
+DSH_APP_DIR="$DSH_HOME/app"
+install -d -o "$DSH_USER" -g "$DSH_USER" -m 0750 "$DSH_APP_DIR"
+npm install --prefix "$DSH_APP_DIR" --omit=dev --ignore-scripts --bin-links=false "$PACKAGE"
+DSH_ENTRYPOINT="$DSH_APP_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
+[[ -r $DSH_ENTRYPOINT ]] || fail 'DSH entrypoint was not found after npm installation'
+DSH_BIN=/usr/local/libexec/dsh-cli
 
 unit_path=/etc/systemd/system/$UNIT_NAME
 if [[ -e $unit_path ]] && ! grep -Fqx "$MARKER" "$unit_path"; then
   fail "$unit_path exists and is not managed by this project"
 fi
 install -d -m 0755 /usr/local/libexec
+install -m 0755 "$SCRIPT_DIR/bin/dsh-cli.sh" /usr/local/libexec/dsh-cli
 start_template=$(<"$SCRIPT_DIR/bin/dsh-web-start.sh")
 start_template=${start_template//@DSH_BIN@/$DSH_BIN}
 printf '%s\n' "$start_template" | install -m 0755 /dev/stdin /usr/local/libexec/dsh-web-start
@@ -100,6 +104,8 @@ env_tmp=$(mktemp /etc/dsh/dsh-web.env.XXXXXX)
 trap 'rm -f "$env_tmp"' EXIT
 {
   printf 'DSH_BIN=%q\n' "$DSH_BIN"
+  printf 'DSH_NODE=%q\n' "$(command -v node)"
+  printf 'DSH_ENTRYPOINT=%q\n' "$DSH_ENTRYPOINT"
   printf 'DSH_PUBLIC_URL=%q\n' "$DSH_PUBLIC_URL"
   printf 'DSH_TRUSTED_HOST=%q\n' "$DSH_TRUSTED_HOST"
   printf 'DSH_PORT=%q\n' "$DSH_PORT"
@@ -122,7 +128,12 @@ fi
 if [[ $DSH_ENABLE == yes ]]; then
   # Exercise the real authenticated entrypoint without printing the credential.
   command -v curl >/dev/null || fail 'curl is required to verify the authenticated entrypoint'
-  login_url=$(runuser -u "$DSH_USER" -- node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$DSH_PUBLIC_URL" 2>/dev/null) || fail 'could not read the current startup credential; inspect the unit journal and rerun'
+  login_url=''
+  for _ in {1..10}; do
+    login_url=$(node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$DSH_PUBLIC_URL" 2>/dev/null) && break
+    sleep 1
+  done
+  [[ -n $login_url ]] || fail 'could not read the current startup credential; inspect the unit journal and rerun'
   verify_authenticated_entrypoint "$login_url" || fail 'authenticated entrypoint did not establish a Secure, HttpOnly, SameSite=Strict cookie; refusing to claim installation success'
   printf 'entry verification: authenticated request and secure cookie succeeded at %s\n' "$DSH_PUBLIC_URL"
 else
@@ -131,4 +142,4 @@ fi
 
 printf 'installed %s, mode=%s, unit=%s, user=%s\n' "$PACKAGE" "$DSH_TAILSCALE_MODE" "$UNIT_NAME" "$DSH_USER"
 printf 'full login URL is intentionally not written to logs or reports; obtain it in the operator terminal with:\n'
-printf 'sudo -u %s node --experimental-strip-types %s/tools/login-url.ts --unit %s --public-url %s\n' "$DSH_USER" "$SCRIPT_DIR" "$UNIT_NAME" "$DSH_PUBLIC_URL"
+printf 'sudo node --experimental-strip-types %s/tools/login-url.ts --unit %s --public-url %s\n' "$SCRIPT_DIR" "$UNIT_NAME" "$DSH_PUBLIC_URL"

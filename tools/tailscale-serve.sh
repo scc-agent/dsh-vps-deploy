@@ -55,7 +55,9 @@ tailscale_preflight() {
     _ts_continue
     return 22
   fi
-  if $DSH_TAILSCALE_BIN funnel status >/dev/null 2>&1; then
+  local funnel_status
+  funnel_status=$($DSH_TAILSCALE_BIN funnel status 2>&1) || funnel_status=''
+  if printf '%s\n' "$funnel_status" | grep -Eiq 'Funnel[[:space:]]+on([[:space:])]|$)|Funnel[[:space:]]+(is[[:space:]]+)?(enabled|active)'; then
     printf 'error: Funnel is enabled/configured; refusing to alter or widen that public exposure.\n' >&2
     printf 'disable Funnel yourself, verify the result, then rerun the continue command.\n' >&2
     _ts_continue
