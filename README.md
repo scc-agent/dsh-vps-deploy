@@ -78,7 +78,7 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 ```
 
-这个模式下 DSH 只绑 `127.0.0.1`，所以 `DSH_PUBLIC_URL` 填非回环地址（例如 `https://vps-jp.tail21c504.ts.net:3082/`）时，安装器**自检探针改用回环地址**（`http://127.0.0.1:${DSH_PORT}/`；原生 TLS 下是 `https://` 并带 `--insecure` 只跳过本机自签证书校验），不会拿不可达的 public URL 去验 401/303/WS。写进 `/etc/dsh/dsh-web.env` 的 `DSH_PUBLIC_URL` 仍是用户给的真实值，只影响自检探针。同时安装器会把 `127.0.0.1` 追加进 `DSH_TRUSTED_HOST`，让 DSH 的 `/api` Host 信任栅栏接受回环探针，避免把健康服务判成 421。
+这个模式下 DSH 只绑 `127.0.0.1`，所以 `DSH_PUBLIC_URL` 填非回环地址（例如 `https://my-machine.example.ts.net:3082/`）时，安装器**自检探针改用回环地址**（`http://127.0.0.1:${DSH_PORT}/`；原生 TLS 下是 `https://` 并带 `--insecure` 只跳过本机自签证书校验），不会拿不可达的 public URL 去验 401/303/WS。写进 `/etc/dsh/dsh-web.env` 的 `DSH_PUBLIC_URL` 仍是用户给的真实值，只影响自检探针。同时安装器会把 `127.0.0.1` 追加进 `DSH_TRUSTED_HOST`，让 DSH 的 `/api` Host 信任栅栏接受回环探针，避免把健康服务判成 421。
 
 结论：local-only + 非回环 `DSH_PUBLIC_URL` 时安装器退出码为 0，不再误报失败。探针地址由 `tools/probe-url.sh` 决定：`serve`/`serve-proxy` 仍按 public URL 验（那才是浏览器的真实路径），只有 `local-only` 才走回环。
 
@@ -96,12 +96,11 @@ sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
 
 也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_MODE`（`native` 默认 / `proxy`）、`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
 
-通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 内存上限为 768M，本机代理为 128M，均由独立用户运行。
+通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 资源上限为 `MemoryHigh=512M`、`MemoryMax=768M`、`CPUQuota=75%`、`TasksMax=128`，并启用 `NoNewPrivileges`、`PrivateDevices`、`ProtectSystem=strict`、`ProtectHome`、`ProtectKernelTunables/Modules/Logs` 和空的 `CapabilityBoundingSet`；回退代理为 128M。两者都由独立用户运行。
 
 ## 认证与验证
 
 - `tools/gen-selfsigned-cert.sh`：生成/复用自签证书。目录 `0750`、证书 `0644`、私钥 `0640` 且属主 `root`、组为 DSH 服务用户，SAN 含 MagicDNS 主机名、`localhost` 和 `127.0.0.1`；仍在有效期内且 SAN 匹配时不会重签。
-- `tools/rotate-native-tls.sh`：校验证书、私钥及公钥匹配后，原子替换同目录文件并只 reload `dsh-web.service`。
 - `tools/verify-ws.mjs`：对目标做一次真实 WebSocket upgrade 握手，只打印状态码，从不打印 Cookie 值。
 - `tools/probe-url.sh`：决定自检探针地址。`serve`/`serve-proxy`/`external-proxy` 用 `DSH_PUBLIC_URL`（浏览器真实路径），`local-only` 用回环地址；同时决定原生 TLS 下探针是否需要 `--insecure`，以及把 `127.0.0.1` 补进可信主机。
 
@@ -148,11 +147,18 @@ sudo systemctl reload dsh-web.service
 ## 诊断与测试
 
 ```sh
-sudo systemctl status dsh-web.service dsh-web-proxy.service
-sudo ss -ltnp | grep -E ':3080|:3081'
+sudo systemctl status dsh-web.service
+sudo ss -ltnp | grep ':3080'
 sudo tailscale serve status --json
 sudo journalctl -u dsh-web.service -b -n 100 --no-pager
 npm test
+```
+
+只有回退到 `serve-proxy` 时才需要多看 `dsh-web-proxy.service` 和 `:3081`：
+
+```sh
+sudo systemctl status dsh-web-proxy.service
+sudo ss -ltnp | grep ':3081'
 ```
 
 `tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、proxy 回退仍可用、代理服务默认不启用，以及从旧代理拓扑迁移时只接管属于自己的 Serve handler。`tests/layout-local-only.test.sh` 离线覆盖安装布局（程序在 `$DSH_APP_ROOT/app` 且 root 所有、`WorkingDirectory` 指向 `$DSH_HOME/workspace`、程序目录不在 `ReadWritePaths` 里、`MemoryMax=768M` 不回归）和 local-only 自检（探针地址取回环、只有 loopback 探针才放宽证书校验、`127.0.0.1` 只补一次进可信主机，以及用 mock curl 端到端跑通 401/303/Cookie 且确认探针不会跑到 public URL）。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
@@ -170,7 +176,7 @@ sudo openssl x509 -in /etc/dsh/tls/dsh.crt -noout -ext subjectAltName
 sudo ls -ld /etc/dsh/tls /etc/dsh/tls/dsh.crt /etc/dsh/tls/dsh.key
 # Serve 后端是不是原生 TLS
 sudo tailscale serve status --json
-# 端口上到底有没有代理
+# 默认模式下 :3081 不应有监听；有监听说明还在旧代理拓扑
 sudo ss -ltnp | grep -E ':3080|:3081'
 ```
 

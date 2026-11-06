@@ -24,6 +24,10 @@ for unit in "$root/systemd/dsh-web.service.in" "$root/systemd/dsh-web-proxy.serv
   grep -Fq 'ReadWritePaths=@DSH_HOME@' "$unit" || die "$(basename "$unit") lost its writable data path"
 done
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in" || die 'MemoryMax regression'
+grep -Fq 'MemoryHigh=512M' "$root/systemd/dsh-web.service.in" || die 'MemoryHigh regression'
+grep -Fq 'CPUQuota=75%' "$root/systemd/dsh-web.service.in" || die 'CPUQuota regression'
+grep -Fq 'TasksMax=128' "$root/systemd/dsh-web.service.in" || die 'TasksMax regression'
+grep -Fq 'PrivateDevices=true' "$root/systemd/dsh-web.service.in" || die 'PrivateDevices regression'
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in" || die 'NoNewPrivileges regression'
 grep -Fq 'unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}' "$root/install.sh" \
   || die 'installer does not template the workspace path into the unit'
@@ -50,9 +54,9 @@ pass 'rendered unit keeps the program root out of reach'
 # --- local-only self-check --------------------------------------------------
 source "$root/tools/probe-url.sh"
 
-[[ $(dsh_probe_url local-only 'https://vps-jp.tail21c504.ts.net:3082/' 3080 no) == 'http://127.0.0.1:3080/' ]] \
+[[ $(dsh_probe_url local-only 'https://my-machine.example.ts.net:3082/' 3080 no) == 'http://127.0.0.1:3080/' ]] \
   || die 'local-only probe does not fall back to loopback'
-[[ $(dsh_probe_url local-only 'https://vps-jp.tail21c504.ts.net:3082/' 3080 yes) == 'https://127.0.0.1:3080/' ]] \
+[[ $(dsh_probe_url local-only 'https://my-machine.example.ts.net:3082/' 3080 yes) == 'https://127.0.0.1:3080/' ]] \
   || die 'local-only probe ignores native TLS'
 [[ $(dsh_probe_url serve 'https://dsh.test.ts.net/' 3080 yes) == 'https://dsh.test.ts.net/' ]] \
   || die 'serve mode should probe the public entrypoint'
@@ -65,7 +69,7 @@ pass 'probe URL follows the mode, not the advertised URL'
 [[ $(dsh_probe_insecure serve yes) == no ]] || die 'the public probe must verify certificates'
 pass 'certificate relaxation is limited to the loopback probe'
 
-[[ $(ensure_trusted_loopback 'vps-jp.tail21c504.ts.net') == 'vps-jp.tail21c504.ts.net 127.0.0.1' ]] \
+[[ $(ensure_trusted_loopback 'my-machine.example.ts.net') == 'my-machine.example.ts.net 127.0.0.1' ]] \
   || die 'loopback was not added to the trusted hosts'
 [[ $(ensure_trusted_loopback 'a.test 127.0.0.1') == 'a.test 127.0.0.1' ]] || die 'loopback was duplicated'
 [[ $(ensure_trusted_loopback '127.0.0.1') == '127.0.0.1' ]] || die 'loopback-only trusted host was mangled'
@@ -122,7 +126,7 @@ cat > "$work/ws.mjs" <<'MOCK'
 process.exit(process.argv.includes('--insecure') ? 0 : 1);
 MOCK
 
-module_probe=$(dsh_probe_url local-only 'https://vps-jp.tail21c504.ts.net:3082/' 3080 no)
+module_probe=$(dsh_probe_url local-only 'https://my-machine.example.ts.net:3082/' 3080 no)
 [[ $module_probe == 'http://127.0.0.1:3080/' ]] || die 'probe mismatch'
 set +e
 CURL_LOG="$work/curl.log" PATH="$work:$PATH" bash -c "
@@ -143,7 +147,7 @@ pass 'local-only 401/303/cookie checks pass against the loopback probe'
 set +e
 CURL_LOG='' PATH="$work:$PATH" bash -c "
   source '$root/tools/verify-auth-cookie.sh'
-  verify_unauthenticated_entrypoint 'https://vps-jp.tail21c504.ts.net:3082/' 401
+  verify_unauthenticated_entrypoint 'https://my-machine.example.ts.net:3082/' 401
 " >/dev/null 2>&1
 actual=$?
 set -e

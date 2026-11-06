@@ -3,6 +3,8 @@
 Description=DeepSeek Harness Web UI (pinned 0.2.2-rc.1)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -14,11 +16,21 @@ ExecStart=/usr/local/libexec/dsh-web-start
 ExecReload=/bin/systemctl restart %N
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=30
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryHigh=512M
 MemoryMax=768M
+CPUQuota=75%
+TasksMax=128
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ReadWritePaths=@DSH_HOME@
 UMask=0077
 

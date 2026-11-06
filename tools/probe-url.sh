@@ -2,7 +2,7 @@
 # Resolve the origin the post-install self-check probes.
 #
 # local-only binds DSH to 127.0.0.1 only, so a non-loopback DSH_PUBLIC_URL
-# (for example https://vps-jp.tail21c504.ts.net:3082/) is simply not reachable
+# (for example https://my-machine.example.ts.net:3082/) is simply not reachable
 # from the host itself: the 401/303 probes would fail against a service that is
 # perfectly healthy. Probe loopback there instead and leave the advertised
 # DSH_PUBLIC_URL untouched for DSH itself.
