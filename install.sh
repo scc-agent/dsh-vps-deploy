@@ -11,6 +11,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 : "${DSH_USER:=dsh}"
 : "${DSH_HOME:=/var/lib/dsh}"
 : "${DSH_PORT:=3080}"
+: "${DSH_PROXY_PORT:=3081}"
 : "${DSH_ENABLE:=yes}"
 : "${DSH_TAILSCALE_MODE:=serve}" # serve (default), local-only, external-proxy, native-tls
 : "${DSH_PUBLIC_URL:=}"
@@ -23,7 +24,13 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail 'run as root (for example: sudo ./install.sh)'
 [[ $DSH_PORT =~ ^[0-9]+$ && $DSH_PORT -ge 1 && $DSH_PORT -le 65535 ]] || fail 'DSH_PORT must be 1..65535'
+[[ $DSH_PROXY_PORT =~ ^[0-9]+$ && $DSH_PROXY_PORT -ge 1 && $DSH_PROXY_PORT -le 65535 && $DSH_PROXY_PORT != "$DSH_PORT" ]] || fail 'DSH_PROXY_PORT must be 1..65535 and differ from DSH_PORT'
 [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == local-only || $DSH_TAILSCALE_MODE == external-proxy || $DSH_TAILSCALE_MODE == native-tls ]] || fail 'DSH_TAILSCALE_MODE must be serve, local-only, external-proxy, or native-tls'
+DSH_USE_PROXY=no
+DSH_PROXY_SECURE_COOKIES=no
+case "$DSH_TAILSCALE_MODE" in
+  serve|external-proxy) DSH_USE_PROXY=yes; DSH_PROXY_SECURE_COOKIES=yes;;
+esac
 [[ $DSH_DRY_RUN == yes || $DSH_DRY_RUN == no ]] || fail 'DSH_DRY_RUN must be yes or no'
 [[ $DSH_ENABLE == yes || $DSH_ENABLE == no ]] || fail 'DSH_ENABLE must be yes or no'
 if [[ -n $DSH_TLS_CERT || -n $DSH_TLS_KEY ]]; then
@@ -34,6 +41,8 @@ fi
 [[ -r "$SCRIPT_DIR/systemd/dsh-web.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web.service.in"
 [[ -r "$SCRIPT_DIR/tools/tailscale-serve.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/tailscale-serve.sh"
 [[ -r "$SCRIPT_DIR/tools/verify-auth-cookie.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-auth-cookie.sh"
+[[ -r "$SCRIPT_DIR/bin/dsh-web-proxy.cjs" ]] || fail "missing resource: $SCRIPT_DIR/bin/dsh-web-proxy.cjs"
+[[ -r "$SCRIPT_DIR/systemd/dsh-web-proxy.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web-proxy.service.in"
 
 if [[ $DSH_DRY_RUN == yes ]]; then
   printf 'dry-run: mode=%s, resources=%s, unit=%s, no host changes made\n' "$DSH_TAILSCALE_MODE" "$SCRIPT_DIR" "$UNIT_NAME"
@@ -85,11 +94,16 @@ DSH_ENTRYPOINT="$DSH_APP_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
 DSH_BIN=/usr/local/libexec/dsh-cli
 
 unit_path=/etc/systemd/system/$UNIT_NAME
+proxy_unit_path=/etc/systemd/system/dsh-web-proxy.service
 if [[ -e $unit_path ]] && ! grep -Fqx "$MARKER" "$unit_path"; then
   fail "$unit_path exists and is not managed by this project"
 fi
+if [[ -e $proxy_unit_path ]] && ! grep -Fqx "$MARKER" "$proxy_unit_path"; then
+  fail "$proxy_unit_path exists and is not managed by this project"
+fi
 install -d -m 0755 /usr/local/libexec
 install -m 0755 "$SCRIPT_DIR/bin/dsh-cli.sh" /usr/local/libexec/dsh-cli
+install -m 0644 "$SCRIPT_DIR/bin/dsh-web-proxy.cjs" /usr/local/libexec/dsh-web-proxy.cjs
 start_template=$(<"$SCRIPT_DIR/bin/dsh-web-start.sh")
 start_template=${start_template//@DSH_BIN@/$DSH_BIN}
 printf '%s\n' "$start_template" | install -m 0755 /dev/stdin /usr/local/libexec/dsh-web-start
@@ -98,6 +112,13 @@ unit_template=${unit_template//@MARKER@/$MARKER}
 unit_template=${unit_template//@DSH_USER@/$DSH_USER}
 unit_template=${unit_template//@DSH_HOME@/$DSH_HOME}
 printf '%s\n' "$unit_template" | install -m 0644 /dev/stdin "$unit_path"
+if [[ $DSH_USE_PROXY == yes ]]; then
+  proxy_unit_template=$(<"$SCRIPT_DIR/systemd/dsh-web-proxy.service.in")
+  proxy_unit_template=${proxy_unit_template//@MARKER@/$MARKER}
+  proxy_unit_template=${proxy_unit_template//@DSH_USER@/$DSH_USER}
+  proxy_unit_template=${proxy_unit_template//@DSH_HOME@/$DSH_HOME}
+  printf '%s\n' "$proxy_unit_template" | install -m 0644 /dev/stdin "$proxy_unit_path"
+fi
 
 # Write secrets/config atomically; the env file is never world-readable.
 env_tmp=$(mktemp /etc/dsh/dsh-web.env.XXXXXX)
@@ -109,6 +130,8 @@ trap 'rm -f "$env_tmp"' EXIT
   printf 'DSH_PUBLIC_URL=%q\n' "$DSH_PUBLIC_URL"
   printf 'DSH_TRUSTED_HOST=%q\n' "$DSH_TRUSTED_HOST"
   printf 'DSH_PORT=%q\n' "$DSH_PORT"
+  printf 'DSH_PROXY_PORT=%q\n' "$DSH_PROXY_PORT"
+  printf 'DSH_PROXY_SECURE_COOKIES=%q\n' "$DSH_PROXY_SECURE_COOKIES"
   printf 'DSH_TLS_CERT=%q\n' "$DSH_TLS_CERT"
   printf 'DSH_TLS_KEY=%q\n' "$DSH_TLS_KEY"
 } > "$env_tmp"
@@ -120,6 +143,7 @@ trap - EXIT
 systemctl daemon-reload
 if [[ $DSH_ENABLE == yes ]]; then
   systemctl enable --now "$UNIT_NAME"
+  if [[ $DSH_USE_PROXY == yes ]]; then systemctl enable --now dsh-web-proxy.service; fi
 fi
 if [[ $DSH_TAILSCALE_MODE == serve ]]; then
   tailscale_serve_apply "$DSH_TRUSTED_HOST" || fail 'Tailscale Serve was not verified; no success is claimed'
@@ -129,12 +153,12 @@ if [[ $DSH_ENABLE == yes ]]; then
   # Exercise the real authenticated entrypoint without printing the credential.
   command -v curl >/dev/null || fail 'curl is required to verify the authenticated entrypoint'
   login_url=''
-  for _ in {1..10}; do
+  for _ in {1..30}; do
     login_url=$(node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$DSH_PUBLIC_URL" 2>/dev/null) && break
     sleep 1
   done
   [[ -n $login_url ]] || fail 'could not read the current startup credential; inspect the unit journal and rerun'
-  verify_authenticated_entrypoint "$login_url" || fail 'authenticated entrypoint did not establish a Secure, HttpOnly, SameSite=Strict cookie; refusing to claim installation success'
+  verify_authenticated_entrypoint "$login_url" "$DSH_PROXY_SECURE_COOKIES" || fail 'authenticated entrypoint did not satisfy the configured Cookie policy; refusing to claim installation success'
   printf 'entry verification: authenticated request and secure cookie succeeded at %s\n' "$DSH_PUBLIC_URL"
 else
   printf 'installed but not started: rerun with DSH_ENABLE=yes to verify the authenticated entrypoint\n'

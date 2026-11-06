@@ -1,0 +1,25 @@
+@MARKER@
+[Unit]
+Description=Local HTTPS and WebSocket proxy for DSH Web
+After=network-online.target dsh-web.service
+Requires=dsh-web.service
+
+[Service]
+Type=simple
+User=@DSH_USER@
+Group=@DSH_USER@
+WorkingDirectory=@DSH_HOME@
+EnvironmentFile=/etc/dsh/dsh-web.env
+ExecStart=/usr/bin/node /usr/local/libexec/dsh-web-proxy.cjs
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+MemoryMax=128M
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@DSH_HOME@
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

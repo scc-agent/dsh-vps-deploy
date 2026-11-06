@@ -1,6 +1,6 @@
 # DSH VPS Deploy
 
-这是一个可审阅、可重复的 Linux VPS 部署工具，固定安装 `@deepseek-ai/dsh@0.2.2-rc.1`。默认流程是 **Tailscale Serve 私有 HTTPS**：DSH 只监听 `127.0.0.1`，Serve 反代到该端口，入口仍受 tailnet ACL/设备接入控制。本流程不会启用 Funnel、开放公网端口、修改防火墙，也不会覆盖其他 Serve handler。
+这是一个可审阅、可重复的通用 Linux VPS 部署工具，固定安装 `@deepseek-ai/dsh@0.2.2-rc.1`，不是 DSH 本体。默认流程是 **Tailscale Serve 私有 HTTPS**：DSH 只监听 `127.0.0.1:3080`，附带的本机代理监听 `127.0.0.1:3081`，负责校验 Host、补齐 Secure Cookie 并透明转发 HTTP/WebSocket；Serve 只代理到本机 3081，入口仍受 tailnet ACL/设备接入控制。本流程不会启用 Funnel、开放公网端口或修改防火墙。
 
 工具不包含任何域名、IP、账号、token、私钥或 API key。
 
@@ -11,7 +11,7 @@
 - Tailscale 必须已登录，tailnet 管理员必须启用 HTTPS/MagicDNS。手机访问前，手机也必须安装 Tailscale 并加入同一 tailnet；浏览器能看到页面不代表手机已接入。
 - DSH 的模型/API 仍需在 Web GUI 的设置中配置。至少选择 DeepSeek provider、填写真实 API 模型配置，并发送一条最小消息确认 assistant 回复；Serve 不会替你配置 API。
 
-这是私有 tailnet 入口，不是公网自动开放方案。DSH 在本机始终使用 loopback HTTP 后端；默认由 Tailscale Serve 在外部提供 HTTPS，再转发到该后端。**重要限制：在 Ubuntu 24.04 旧机的真实安装测试中，DSH `0.2.2-rc.1` 的登录 Cookie 缺少 `Secure`，安装器因此按设计拒绝报成功。当前默认 Serve 流程尚未达到开箱即用；要完成安装，需要增加能安全补齐 Cookie 属性的本机 HTTPS 反代并端到端验证。**任何自定义反代都必须在外部确保 HTTPS 和安全 cookie 属性。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
+这是私有 tailnet 入口，不是公网自动开放方案。代理只绑定 loopback；它仅在应用之后的 HTTPS 信任边界内补上 Secure 属性，其他 Cookie 属性原样保留。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
 
 ## 默认安装
 
@@ -21,10 +21,10 @@
 sudo DSH_DRY_RUN=yes ./install.sh
 ```
 
-默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才安装 DSH、启动 `dsh-web.service`，并执行：
+默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才在独立目录安装 DSH，启动 `dsh-web.service` 和 `dsh-web-proxy.service`，并执行：
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:3080
+tailscale serve --bg --https=443 http://127.0.0.1:3081
 ```
 
 `DSH_PUBLIC_URL` 和 `DSH_TRUSTED_HOST` 未显式提供时，会从 Tailscale 当前机器的 DNS 名称自动探测。可显式固定：
@@ -34,7 +34,7 @@ sudo DSH_PUBLIC_URL=https://my-machine.example.ts.net/ \
   DSH_TRUSTED_HOST=my-machine.example.ts.net ./install.sh
 ```
 
-Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本工具的 `127.0.0.1:3080`，它会视为已配置；应用失败也不会冒充成功。
+Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本工具的代理端口 `127.0.0.1:3081`，它会视为已配置；应用失败也不会冒充成功。
 
 ### 缺失、未登录或 HTTPS 未启用
 
@@ -57,11 +57,11 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 ```
 
-`DSH_TAILSCALE_MODE=external-proxy` 保留现有反代方式。外部反代必须使用 HTTPS，保留浏览器的 Host/Origin、WebSocket Upgrade，并正确处理挂载路径和 cookie Path。安装器首次实际认证会检查响应的 `Set-Cookie` 是否同时包含 `Secure`、`HttpOnly` 和 `SameSite=Strict`；缺任何属性都会失败并且不报告安装成功。HTTP 反代不能通过这项验证，除非它前面有真正提供 HTTPS 且不丢失这些属性的安全代理。
+`DSH_TAILSCALE_MODE=external-proxy` 不使用 Tailscale Serve，但仍安装本机代理；你的 HTTPS 反代应转发到 `http://127.0.0.1:3081`，保留 Host/Origin、WebSocket Upgrade 和挂载路径。安装器会实际认证并检查 `Set-Cookie` 同时含 `Secure`、`HttpOnly` 和 `SameSite=Strict`，不满足就失败。
 
-`DSH_TAILSCALE_MODE=native-tls` 让 DSH 自己使用同时提供的 `DSH_TLS_CERT`/`DSH_TLS_KEY`。证书必须是匹配的可读 PEM 文件，且 `DSH_PUBLIC_URL` 必须是 HTTPS。该模式不由 Tailscale Serve 管理。
+`DSH_TAILSCALE_MODE=native-tls` 让 DSH 自己使用同时提供的 `DSH_TLS_CERT`/`DSH_TLS_KEY`，不安装本机代理。证书必须是匹配的可读 PEM 文件，且 `DSH_PUBLIC_URL` 必须是 HTTPS。该模式不由 Tailscale Serve 管理。
 
-通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`）、`DSH_PORT`（默认 `3080`）、`DSH_ENABLE`（默认 `yes`）。systemd 保留 `MemoryMax=768M`，服务继续由独立用户运行。
+通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 内存上限为 768M，本机代理为 128M，均由独立用户运行。
 
 ## 认证与验证
 
@@ -89,23 +89,23 @@ native TLS 的证书文件完全是另一条生命周期。DSH 不申请、续�
 sudo systemctl reload dsh-web.service
 ```
 
-本 unit 的 reload 等价于只重启 `dsh-web.service`，不会重启 Tailscale 或其他服务。仅使用 Serve 时，不要生成或复制本机证书副本，也不需要因 Serve 续期重载 DSH。
+DSH unit 的 reload 等价于只重启 `dsh-web.service`，不会重启 Tailscale 或其他服务。仅使用 Serve 时，不要生成或复制本机证书副本，也不需要因 Serve 续期重载 DSH。
 
 ## 诊断与测试
 
 ```sh
-sudo systemctl status dsh-web.service
-sudo ss -ltnp | grep ':3080'
+sudo systemctl status dsh-web.service dsh-web-proxy.service
+sudo ss -ltnp | grep -E ':3080|:3081'
 sudo tailscale serve status --json
 sudo journalctl -u dsh-web.service -b -n 100 --no-pager
 npm test
 ```
 
-`tests/test.sh` 不接触宿主 systemd、Tailscale 状态或网络：它使用隔离 mock 覆盖未登录、HTTPS 未启用、Serve 冲突、重复运行、成功和应用失败，并检查 DSH 版本、loopback、MemoryMax 与路径行为。mock 回归不等同于全新机器集成测试。
+`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。2026-11-06 已在 Ubuntu 24.04 / Node 24.22.1 上完成一次实装：未认证入口为 401、带令牌登录回 303 且 Cookie 安全属性通过；测试实例随后已清理。WebSocket 通过代理模拟往返测试，尚未单独测试 DSH 的实际实时路由。
 
 ## 版本与来源
 
-- DSH：`@deepseek-ai/dsh@0.2.2-rc.1`，npm integrity 在 `install.sh` 中固定校验；依赖安装在独立的服务目录，不创建系统级 npm 命令链接。
+- DSH：`@deepseek-ai/dsh@0.2.2-rc.1`，npm integrity 在 `install.sh` 中固定校验；依赖安装在独立的服务目录，不创建系统级 npm 命令链接。该 RC 仍是预览版；2026-11-06 在 Ubuntu 24.04 安装时 npm 报告 209 条依赖漏洞（201 高危、8 中危），不建议用于生产或敏感数据。
 - DSH 官方仓库：[deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)。
 - Tailscale Serve：[官方 CLI 文档](https://tailscale.com/kb/1242/tailscale-serve)。
 - Tailscale HTTPS：[官方说明](https://tailscale.com/kb/1153/enabling-https)。

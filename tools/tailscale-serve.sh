@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 : "${DSH_TAILSCALE_BIN:=tailscale}"
 : "${DSH_TAILSCALE_PORT:=443}"
+: "${DSH_PROXY_PORT:=3081}"
 
 _ts_json_field() {
   local json=$1 field=$2 value=''
@@ -67,7 +68,7 @@ tailscale_preflight() {
   # Any existing Serve config is owned by someone else unless it already points
   # at this deployment's loopback port. Never reset or replace other handlers.
   if [[ -n $serve_status && $serve_status != '{}' && $serve_status != 'null' ]]; then
-    if ! printf '%s' "$serve_status" | grep -Fq "127.0.0.1:${DSH_PORT}" ||
+    if ! printf '%s' "$serve_status" | grep -Fq "127.0.0.1:${DSH_PROXY_PORT}" ||
        [[ $(printf '%s' "$serve_status" | grep -o '"Handler"' | wc -l) -gt 1 ]]; then
       printf 'error: Tailscale Serve already has a different handler; refusing to overwrite it.\n' >&2
       printf 'inspect with: sudo tailscale serve status --json\n' >&2
@@ -97,7 +98,7 @@ tailscale_serve_apply() {
   local host=$1
   [[ $host != *.invalid ]] || { printf 'error: cannot configure Serve with placeholder hostname %s\n' "$host" >&2; return 26; }
   # --bg changes only the current machine's Serve config; never use funnel.
-  if ! "$DSH_TAILSCALE_BIN" serve --bg --https="$DSH_TAILSCALE_PORT" "http://127.0.0.1:${DSH_PORT}"; then
+  if ! "$DSH_TAILSCALE_BIN" serve --bg --https="$DSH_TAILSCALE_PORT" "http://127.0.0.1:${DSH_PROXY_PORT}"; then
     printf 'error: Tailscale Serve could not enable HTTPS or install the handler; enable tailnet HTTPS and retry.\n' >&2
     _ts_continue
     return 22
@@ -106,7 +107,7 @@ tailscale_serve_apply() {
   final=$($DSH_TAILSCALE_BIN serve status --json 2>/dev/null) || {
     printf 'error: Serve apply returned success but status could not be read\n' >&2; return 27;
   }
-  printf '%s' "$final" | grep -Fq "127.0.0.1:${DSH_PORT}" || {
-    printf 'error: Serve verification did not find the DSH loopback handler\n' >&2; return 27;
+  printf '%s' "$final" | grep -Fq "127.0.0.1:${DSH_PROXY_PORT}" || {
+    printf 'error: Serve verification did not find the DSH proxy handler\n' >&2; return 27;
   }
 }

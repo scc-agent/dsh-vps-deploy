@@ -9,6 +9,9 @@ grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh"
+grep -Fq 'DSH_USE_PROXY=yes' "$root/install.sh"
+grep -Fq 'DSH_PROXY_PORT' "$root/tools/tailscale-serve.sh"
+grep -Fq 'Secure' "$root/bin/dsh-web-proxy.cjs"
 grep -Fq 'tailscale_auto_install' "$root/tools/tailscale-serve.sh"
 grep -Fq 'npm install --prefix' "$root/install.sh"
 grep -Fq -- '--bin-links=false' "$root/install.sh"
@@ -41,11 +44,11 @@ case "$1 ${2:-}" in
     case ${TS_CASE:-success} in
       https-off) exit 1;;
       conflict) printf '{"Web":{"https://other":{"Handler":"http://127.0.0.1:9999"}}}';;
-      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"http://127.0.0.1:3080"}}}';;
+      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"http://127.0.0.1:3081"}}}';;
     esac;;
   "funnel status")
     case ${TS_CASE:-success} in
-      funnel-on) printf 'https://dsh.test.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3080\n';;
+      funnel-on) printf 'https://dsh.test.ts.net (Funnel on)\n|-- / proxy http://127.0.0.1:3081\n';;
       *) printf 'No serve config\n';;
     esac;;
   "serve --bg")
@@ -59,7 +62,7 @@ chmod +x "$mock"
 run_case() {
   local expected=$1 case_name=$2
   set +e
-  TS_CASE=$case_name DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_preflight" >/dev/null 2>"$tmp/error"
+  TS_CASE=$case_name DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_preflight" >/dev/null 2>"$tmp/error"
   local actual=$?
   set -e
   [[ $actual -eq $expected ]] || { cat "$tmp/error" >&2; return 1; }
@@ -71,7 +74,7 @@ run_case 23 funnel-on
 run_case 0 success
 run_case 0 success # repeated configuration is accepted when it is already ours
 set +e
-TS_CASE=apply-fail DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_serve_apply dsh.test.ts.net" >/dev/null 2>"$tmp/error"
+TS_CASE=apply-fail DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_serve_apply dsh.test.ts.net" >/dev/null 2>"$tmp/error"
 actual=$?
 set -e
 [[ $actual -ne 0 ]] || { cat "$tmp/error" >&2; exit 1; }
@@ -100,17 +103,24 @@ MOCK
 chmod +x "$tmp/curl"
 source "$root/tools/verify-auth-cookie.sh"
 run_cookie_case() {
-  local expected=$1 case_name=$2
+  local expected=$1 case_name=$2 require_secure=${3:-yes}
   set +e
-  COOKIE_CASE=$case_name PATH="$tmp:$PATH" verify_authenticated_entrypoint 'https://dsh.example.invalid/login?credential=redacted' >/dev/null 2>"$tmp/cookie-error"
+  COOKIE_CASE=$case_name PATH="$tmp:$PATH" verify_authenticated_entrypoint 'https://dsh.example.invalid/login?credential=redacted' "$require_secure" >/dev/null 2>"$tmp/cookie-error"
   local actual=$?
   set -e
   [[ $actual -eq $expected ]] || { cat "$tmp/cookie-error" >&2; return 1; }
 }
 run_cookie_case 0 secure
+run_cookie_case 0 missing-secure no
 run_cookie_case 1 missing-secure
 run_cookie_case 1 missing-http-only
 run_cookie_case 1 missing-same-site
 run_cookie_case 1 no-cookie
 
-printf 'static, secure-cookie, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
+if command -v "$node_bin" >/dev/null 2>&1; then
+  "$node_bin" --check "$root/bin/dsh-web-proxy.cjs"
+  "$node_bin" --test "$root/tests/proxy.test.cjs"
+else
+  printf 'proxy runtime tests skipped: Node.js is unavailable\n'
+fi
+printf 'static, secure-cookie, proxy, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'

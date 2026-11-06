@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 verify_authenticated_entrypoint() {
-  local login_url=$1
+  local login_url=$1 require_secure=${2:-yes}
   local headers curl_error http_code
   headers=$(mktemp)
   curl_error=$(mktemp)
@@ -27,7 +27,7 @@ verify_authenticated_entrypoint() {
   esac
 
   local cookie_check
-  cookie_check=$(awk '
+  cookie_check=$(awk -v require_secure="$require_secure" '
     BEGIN { found=0; secure=0; http_only=0; same_site=0 }
     /^[[:space:]]*[Ss][Ee][Tt]-[Cc][Oo][Oo][Kk][Ii][Ee]:/ {
       found=1
@@ -38,7 +38,7 @@ verify_authenticated_entrypoint() {
     }
     END {
       if (!found) print "missing Set-Cookie"
-      else if (!secure) print "missing Secure"
+      else if (require_secure == "yes" && !secure) print "missing Secure"
       else if (!http_only) print "missing HttpOnly"
       else if (!same_site) print "missing SameSite=Strict"
       else print "ok"
