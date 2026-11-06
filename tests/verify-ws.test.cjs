@@ -56,7 +56,9 @@ after(() => server.close());
 
 function jarWith(value) {
   const jar = join(mkdtempSync(join(tmpdir(), 'dsh-jar-')), 'cookies.txt');
-  writeFileSync(jar, `127.0.0.1\tFALSE\t/\tTRUE\t0\tdsh-auth\t${value}\n`);
+  // curl marks HttpOnly cookies with a "#HttpOnly_" prefix; the verifier must
+  // still read them or every authenticated upgrade looks unauthenticated.
+  writeFileSync(jar, `#HttpOnly_127.0.0.1\tFALSE\t/\tTRUE\t0\tdsh-auth\t${value}\n`);
   return jar;
 }
 

@@ -40,7 +40,10 @@ function cookieHeader(file) {
     return '';
   }
   const pairs = [];
-  for (const line of text.split('\n')) {
+  for (const raw of text.split('\n')) {
+    // curl and other Netscape-jar writers prefix HttpOnly cookies with
+    // "#HttpOnly_"; those are real cookies, not comments. Only a bare "#" is.
+    const line = raw.startsWith('#HttpOnly_') ? raw.slice('#HttpOnly_'.length) : raw;
     if (!line || line.startsWith('#')) continue;
     const fields = line.split('\t');
     if (fields.length < 7) continue;
@@ -64,8 +67,14 @@ const isHttps = target.protocol === 'https:';
 const port = Number(target.port || (isHttps ? 443 : 80));
 const timeoutMs = 10000;
 
+// SNI must be a DNS name (RFC 6066), so prefer the configured host name when
+// we connect to a literal address.
+const sniHost = (() => {
+  const candidate = args.host || target.hostname;
+  return net.isIP(candidate) ? undefined : candidate;
+})();
 const socket = isHttps
-  ? tls.connect({ host: target.hostname, port, servername: target.hostname, rejectUnauthorized: !args.insecure })
+  ? tls.connect({ host: target.hostname, port, servername: sniHost, rejectUnauthorized: !args.insecure })
   : net.connect({ host: target.hostname, port });
 
 let raw = '';
