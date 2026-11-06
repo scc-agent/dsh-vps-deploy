@@ -42,6 +42,13 @@ before(async () => {
   server = https.createServer({ key: require('node:fs').readFileSync(key), cert: require('node:fs').readFileSync(cert) });
   // DSH rejects unauthenticated upgrades with 401 and accepts valid cookies.
   server.on('upgrade', (req, socket) => {
+    // RFC 6455: the key must be 16 random bytes, base64 encoded. DSH answers
+    // 400 otherwise, so the mock must be just as strict.
+    const key = Buffer.from(String(req.headers['sec-websocket-key'] || ''), 'base64');
+    if (key.length !== 16) {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+      return;
+    }
     if (!/dsh-auth=/.test(req.headers.cookie || '')) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       return;

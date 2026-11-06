@@ -6,6 +6,7 @@
  *                      [--insecure] [--expect 101]
  * Exit status is 0 only when the upgrade handshake is accepted.
  */
+import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import tls from 'node:tls';
@@ -58,7 +59,8 @@ const headers = {
   Connection: 'Upgrade',
   Upgrade: 'websocket',
   'Sec-WebSocket-Version': '13',
-  'Sec-WebSocket-Key': Buffer.from('dsh-deploy-verify').toString('base64'),
+  // RFC 6455 requires exactly 16 random bytes; a wrong length is rejected 400.
+  'Sec-WebSocket-Key': crypto.randomBytes(16).toString('base64'),
   Host: args.host || target.host,
 };
 if (cookie) headers.Cookie = cookie;
