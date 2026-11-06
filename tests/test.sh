@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
-bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" "$root/tests/test.sh"
+bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" \
+  "$root/tools/gen-selfsigned-cert.sh" "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" \
+  "$root/tests/test.sh" "$root/tests/native-tls.test.sh"
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
@@ -10,6 +12,8 @@ grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh"
 grep -Fq 'DSH_USE_PROXY=yes' "$root/install.sh"
+grep -Fq 'DSH_TLS_CERT' "$root/bin/dsh-web-start.sh"
+grep -Fq 'https+insecure' "$root/install.sh"
 grep -Fq 'DSH_PROXY_PORT' "$root/tools/tailscale-serve.sh"
 grep -Fq 'Secure' "$root/bin/dsh-web-proxy.cjs"
 grep -Fq 'tailscale_auto_install' "$root/tools/tailscale-serve.sh"
@@ -17,6 +21,9 @@ grep -Fq 'npm install --prefix' "$root/install.sh"
 grep -Fq -- '--bin-links=false' "$root/install.sh"
 grep -Fq 'DSH_ENTRYPOINT' "$root/bin/dsh-cli.sh"
 ! grep -Fq 'npm install --global' "$root/install.sh"
+# Tests must never execute the real installer (it would touch the host).
+! grep -RqE '(^|[^[:alnum:]_])(bash|sh|source)[[:space:]]+"?\$root/install\.sh' "$root/tests/native-tls.test.sh" \
+  || { printf 'refusing to run: a test executes install.sh\n' >&2; exit 1; }
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 ! grep -RniE 'curl[^\n]*\|[[:space:]]*sh|tailscale[[:space:]]+funnel' "$root/install.sh" "$root/bin" "$root/systemd"
 
@@ -44,7 +51,7 @@ case "$1 ${2:-}" in
     case ${TS_CASE:-success} in
       https-off) exit 1;;
       conflict) printf '{"Web":{"https://other":{"Handler":"http://127.0.0.1:9999"}}}';;
-      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"http://127.0.0.1:3081"}}}';;
+      *) printf '{"Web":{"https://dsh.test.ts.net":{"Handler":"%s"}}}' "${TS_BACKEND:-http://127.0.0.1:3081}";;
     esac;;
   "funnel status")
     case ${TS_CASE:-success} in
@@ -73,6 +80,14 @@ run_case 24 conflict
 run_case 23 funnel-on
 run_case 0 success
 run_case 0 success # repeated configuration is accepted when it is already ours
+
+# The preflight must accept the native TLS backend as "already ours".
+set +e
+TS_CASE=success TS_BACKEND='https+insecure://127.0.0.1:3080' DSH_SERVE_BACKEND='https+insecure://127.0.0.1:3080' \
+  DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_preflight" >/dev/null 2>"$tmp/error"
+actual=$?
+set -e
+[[ $actual -eq 0 ]] || { cat "$tmp/error" >&2; exit 1; }
 set +e
 TS_CASE=apply-fail DSH_TAILSCALE_BIN="$mock" DSH_PORT=3080 DSH_PROXY_PORT=3081 bash -c ". '$root/tools/tailscale-serve.sh'; tailscale_serve_apply dsh.test.ts.net" >/dev/null 2>"$tmp/error"
 actual=$?
@@ -90,6 +105,8 @@ while (($#)); do
     *) shift;;
   esac
 done
+# Status-only callers pass no --dump-header: answer with the code alone.
+if [[ -z $header ]]; then printf '%s' "${COOKIE_STATUS:-200}"; exit 0; fi
 case ${COOKIE_CASE:-secure} in
   secure) printf 'Set-Cookie: session=redacted; Secure; HttpOnly; SameSite=Strict\r\n' > "$header";;
   missing-secure) printf 'Set-Cookie: session=redacted; HttpOnly; SameSite=Strict\r\n' > "$header";;
@@ -98,7 +115,7 @@ case ${COOKIE_CASE:-secure} in
   no-cookie) : > "$header";;
   *) exit 1;;
 esac
-printf '200'
+printf '%s' "${COOKIE_STATUS:-200}"
 MOCK
 chmod +x "$tmp/curl"
 source "$root/tools/verify-auth-cookie.sh"
@@ -117,10 +134,33 @@ run_cookie_case 1 missing-http-only
 run_cookie_case 1 missing-same-site
 run_cookie_case 1 no-cookie
 
+# Unauthenticated base must be 401 and the credential URL must be 303.
+set +e
+COOKIE_STATUS=401 PATH="$tmp:$PATH" bash -c ". '$root/tools/verify-auth-cookie.sh'; verify_unauthenticated_entrypoint 'https://dsh.example.invalid/' 401" >/dev/null 2>&1
+actual=$?
+set -e
+[[ $actual -eq 0 ]] || { printf 'expected 401 to be accepted\n' >&2; exit 1; }
+set +e
+COOKIE_STATUS=200 PATH="$tmp:$PATH" bash -c ". '$root/tools/verify-auth-cookie.sh'; verify_unauthenticated_entrypoint 'https://dsh.example.invalid/' 401" >/dev/null 2>&1
+actual=$?
+set -e
+[[ $actual -ne 0 ]] || { printf 'expected 200 to be rejected where 401 is required\n' >&2; exit 1; }
+set +e
+COOKIE_STATUS=303 PATH="$tmp:$PATH" bash -c ". '$root/tools/verify-auth-cookie.sh'; verify_login_redirect 'https://dsh.example.invalid/login?credential=redacted' 303" >/dev/null 2>&1
+actual=$?
+set -e
+[[ $actual -eq 0 ]] || { printf 'expected 303 to be accepted\n' >&2; exit 1; }
+set +e
+COOKIE_STATUS=200 PATH="$tmp:$PATH" bash -c ". '$root/tools/verify-auth-cookie.sh'; verify_login_redirect 'https://dsh.example.invalid/login?credential=redacted' 303" >/dev/null 2>&1
+actual=$?
+set -e
+[[ $actual -ne 0 ]] || { printf 'expected 200 to be rejected where 303 is required\n' >&2; exit 1; }
+
 if command -v "$node_bin" >/dev/null 2>&1; then
   "$node_bin" --check "$root/bin/dsh-web-proxy.cjs"
-  "$node_bin" --test "$root/tests/proxy.test.cjs"
+  "$node_bin" --test "$root/tests/proxy.test.cjs" "$root/tests/verify-ws.test.cjs"
 else
   printf 'proxy runtime tests skipped: Node.js is unavailable\n'
 fi
-printf 'static, secure-cookie, proxy, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
+bash "$root/tests/native-tls.test.sh"
+printf 'static, secure-cookie, 401/303, proxy, native TLS, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'

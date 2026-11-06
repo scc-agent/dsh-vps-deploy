@@ -1,6 +1,8 @@
 # DSH VPS Deploy
 
-这是一个可审阅、可重复的通用 Linux VPS 部署工具，固定安装 `@deepseek-ai/dsh@0.2.2-rc.1`，不是 DSH 本体。默认流程是 **Tailscale Serve 私有 HTTPS**：DSH 只监听 `127.0.0.1:3080`，附带的本机代理监听 `127.0.0.1:3081`，负责校验 Host、补齐 Secure Cookie 并透明转发 HTTP/WebSocket；Serve 只代理到本机 3081，入口仍受 tailnet ACL/设备接入控制。本流程不会启用 Funnel、开放公网端口或修改防火墙。
+这是一个可审阅、可重复的通用 Linux VPS 部署工具，固定安装 `@deepseek-ai/dsh@0.2.2-rc.1`，不是 DSH 本体。默认流程是 **原生 TLS + Tailscale Serve 私有 HTTPS**：安装器用 `openssl` 生成 10 年期自签证书，DSH 自己用 `--tls-cert`/`--tls-key` 在 `127.0.0.1:3080` 上跑 HTTPS，Serve 通过 `https+insecure://127.0.0.1:3080` 直连它，**中间没有本机代理**。因为后端本身就是 HTTPS，`DSH_PUBLIC_URL` 为 https 时 DSH 会自己给 Cookie 加 `Secure`，不需要代理补。入口仍受 tailnet ACL/设备接入控制。本流程不会启用 Funnel、开放公网端口或修改防火墙。
+
+旧的 `dsh-web-proxy.service`（127.0.0.1:3081 校验 Host、补 Secure Cookie）保留为**可选回退**，默认不安装、不启用。
 
 工具不包含任何域名、IP、账号、token、私钥或 API key。
 
@@ -11,7 +13,7 @@
 - Tailscale 必须已登录，tailnet 管理员必须启用 HTTPS/MagicDNS。手机访问前，手机也必须安装 Tailscale 并加入同一 tailnet；浏览器能看到页面不代表手机已接入。
 - DSH 的模型/API 仍需在 Web GUI 的设置中配置。至少选择 DeepSeek provider、填写真实 API 模型配置，并发送一条最小消息确认 assistant 回复；Serve 不会替你配置 API。
 
-这是私有 tailnet 入口，不是公网自动开放方案。代理只绑定 loopback；它仅在应用之后的 HTTPS 信任边界内补上 Secure 属性，其他 Cookie 属性原样保留。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
+这是私有 tailnet 入口，不是公网自动开放方案。默认模式下没有中间代理：TLS 由 DSH 自己终止，Cookie 的 `Secure` 由 DSH 依据 https 的 `DSH_PUBLIC_URL` 自行下发。只有回退到 proxy 模式时代理才会介入，且只绑定 loopback。Funnel 与 Serve 是不同功能，本文和脚本都不会替你打开 Funnel。
 
 ## 默认安装
 
@@ -21,20 +23,20 @@
 sudo DSH_DRY_RUN=yes ./install.sh
 ```
 
-默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才在独立目录安装 DSH，启动 `dsh-web.service` 和 `dsh-web-proxy.service`，并执行：
+默认安装会先只读检查 Tailscale：CLI 存在、`BackendState=Running`、有本机 MagicDNS 名称、Serve/HTTPS 可用、没有已有不同 handler，也没有 Funnel。之后才在独立目录安装 DSH，生成自签证书，只启动 `dsh-web.service`（不再启用 `dsh-web-proxy.service`），并执行：
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:3081
+tailscale serve --bg --https=443 https+insecure://127.0.0.1:3080
 ```
 
-`DSH_PUBLIC_URL` 和 `DSH_TRUSTED_HOST` 未显式提供时，会从 Tailscale 当前机器的 DNS 名称自动探测。可显式固定：
+`DSH_PUBLIC_URL` 和 `DSH_TRUSTED_HOST` 未显式提供时，会从 Tailscale 当前机器的 DNS 名称自动探测，该名称同时用作证书 SAN。可显式固定：
 
 ```sh
 sudo DSH_PUBLIC_URL=https://my-machine.example.ts.net/ \
   DSH_TRUSTED_HOST=my-machine.example.ts.net ./install.sh
 ```
 
-Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本工具的代理端口 `127.0.0.1:3081`，它会视为已配置；应用失败也不会冒充成功。
+Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本模式的后端（默认 `https+insecure://127.0.0.1:3080`，回退模式为 `http://127.0.0.1:3081`），它会视为已配置；应用失败也不会冒充成功。从旧版本升级时，安装器会停用并移除遗留的 `dsh-web-proxy.service`。
 
 ### 缺失、未登录或 HTTPS 未启用
 
@@ -49,7 +51,7 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 
 ## 可选模式
 
-`DSH_TAILSCALE_MODE=serve` 是默认且推荐的私有 HTTPS 模式。
+`DSH_TAILSCALE_MODE=serve` 是默认且推荐的私有 HTTPS 模式：自签证书 + 原生 TLS + Serve 直连 3080。
 
 `DSH_TAILSCALE_MODE=local-only` 保持 loopback，只适合 SSH 隧道或本机访问：
 
@@ -57,17 +59,37 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 ```
 
-`DSH_TAILSCALE_MODE=external-proxy` 不使用 Tailscale Serve，但仍安装本机代理；你的 HTTPS 反代应转发到 `http://127.0.0.1:3081`，保留 Host/Origin、WebSocket Upgrade 和挂载路径。安装器会实际认证并检查 `Set-Cookie` 同时含 `Secure`、`HttpOnly` 和 `SameSite=Strict`，不满足就失败。
+`DSH_TAILSCALE_MODE=serve-proxy` 是旧的回退拓扑：DSH 明文跑 3080，本机代理监听 3081 并补 Secure Cookie，Serve 指向 3081。等价简写是 `DSH_TLS_MODE=proxy`。只有在原生 TLS 出问题时才需要它：
 
-`DSH_TAILSCALE_MODE=native-tls` 让 DSH 自己使用同时提供的 `DSH_TLS_CERT`/`DSH_TLS_KEY`，不安装本机代理。证书必须是匹配的可读 PEM 文件，且 `DSH_PUBLIC_URL` 必须是 HTTPS。该模式不由 Tailscale Serve 管理。
+```sh
+sudo DSH_TLS_MODE=proxy ./install.sh
+# 等价于
+sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
+```
+
+切回默认原生 TLS 直接重跑 `sudo ./install.sh`，代理服务会被停用并移除。
+
+`DSH_TAILSCALE_MODE=external-proxy` 不使用 Tailscale Serve，但安装本机代理；你的 HTTPS 反代应转发到 `http://127.0.0.1:3081`，保留 Host/Origin、WebSocket Upgrade 和挂载路径。注意此模式下 **DSH 不自行下发 Secure**，安装器会实际认证并检查 `Set-Cookie` 同时含 `Secure`、`HttpOnly` 和 `SameSite=Strict`，不满足就失败。
+
+也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_MODE`（`native` 默认 / `proxy`）、`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
 
 通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 内存上限为 768M，本机代理为 128M，均由独立用户运行。
 
 ## 认证与验证
 
+- `tools/gen-selfsigned-cert.sh`：生成/复用自签证书。目录 `0750`、证书 `0644`、私钥 `0640` 且属主 `root`、组为 DSH 服务用户，SAN 含 MagicDNS 主机名、`localhost` 和 `127.0.0.1`；仍在有效期内且 SAN 匹配时不会重签。
 - `tools/rotate-native-tls.sh`：校验证书、私钥及公钥匹配后，原子替换同目录文件并只 reload `dsh-web.service`。
+- `tools/verify-ws.mjs`：对目标做一次真实 WebSocket upgrade 握手，只打印状态码，从不打印 Cookie 值。
 
-安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并通过实际入口发起一次认证 URL 请求；它会检查响应是否设置同时包含 `Secure`、`HttpOnly`、`SameSite=Strict` 的 cookie。状态码、cookie 或任一属性不符合要求都会退出，不会声称安装成功。完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
+安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并做三道真实认证校验：
+
+1. 未认证的公开基础地址必须返回 **401**（不是 200，也不是被代理放行）。
+2. 带凭据的登录 URL 必须返回 **303** 跳转。
+3. `Set-Cookie` 必须同时含 `Secure`、`HttpOnly`、`SameSite=Strict`（原生 TLS 模式下由 DSH 依据 https 的 public-url 自行下发）。
+
+任一项不符合就退出，不会声称安装成功。随后还会对 `https://127.0.0.1:3080/api/remote.mux`（回退模式为 3081）带登录 Cookie 做一次 upgrade 握手，必须拿到 **101**；自签证书用 `NODE_TLS_REJECT_UNAUTHORIZED=0` 之类的等价方式跳过校验（脚本内部用 `--insecure` 只跳过本地校验）。可用 `DSH_VERIFY_WS=no` 跳过 WS 检查，但不建议。
+
+完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
 
 ```sh
 sudo node --experimental-strip-types \
@@ -81,15 +103,21 @@ sudo node --experimental-strip-types \
 
 ## TLS 与证书生命周期
 
-Tailscale Serve 的 HTTPS 证书由 Tailscale 管理，Serve 的证书续期不等于 DSH 本机证书文件续期；本流程不会把 Serve 误说成 `DSH_TLS_CERT`/`DSH_TLS_KEY` 的文件管理器。
+默认模式有两条互不相干的证书链路：
 
-native TLS 的证书文件完全是另一条生命周期。DSH 不申请、续期或自动重新读取它们。续期维护必须由外部 ACME/证书系统以可靠原子方式替换文件（同目录临时文件、权限校验、原子 rename），然后只 reload 本工具服务：
+- **Tailscale Serve 的 HTTPS 证书**由 Tailscale 自己签发和续期，浏览器看到的是这张。它的续期不影响 DSH。
+- **DSH 本机的自签证书**（`/etc/dsh/tls/dsh.crt`）只是 Serve → 3080 这段回环链路的凭据，有效期 **3650 天（10 年）**，DSH 不申请、不续期、也不自动重读。
+
+也就是说自签证书默认能用十年；**到期前必须重新生成并重启服务**，否则 Serve 的 `https+insecure` 后端会握手失败。重签：
 
 ```sh
+sudo rm -f /etc/dsh/tls/dsh.crt /etc/dsh/tls/dsh.key   # 或 DSH_TLS_DAYS 调短后强制重建
+sudo ./install.sh                                      # 复用现有安装，只重签并重启
+# 只换证书、不动其他配置时：
 sudo systemctl reload dsh-web.service
 ```
 
-DSH unit 的 reload 等价于只重启 `dsh-web.service`，不会重启 Tailscale 或其他服务。仅使用 Serve 时，不要生成或复制本机证书副本，也不需要因 Serve 续期重载 DSH。
+`systemctl reload dsh-web.service` 等价于只重启 `dsh-web.service`，不会重启 Tailscale 或其他服务。若改用外部 ACME 证书，请以可靠原子方式替换文件（同目录临时文件、权限校验、原子 rename）后再 reload。
 
 ## 诊断与测试
 
@@ -101,7 +129,26 @@ sudo journalctl -u dsh-web.service -b -n 100 --no-pager
 npm test
 ```
 
-`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。2026-11-06 已在 Ubuntu 24.04 / Node 24.22.1 上完成一次实装：未认证入口为 401、带令牌登录回 303 且 Cookie 安全属性通过；测试实例随后已清理。WebSocket 通过代理模拟往返测试，尚未单独测试 DSH 的实际实时路由。
+`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、proxy 回退仍可用、代理服务默认不启用，以及从旧代理拓扑迁移时只接管属于自己的 Serve handler。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
+
+2026-11-06 已在 Ubuntu 24.04 / Node 24.22.1 上完成实装验证：未认证入口 401、带令牌登录 303、Cookie 含 `Secure`/`HttpOnly`/`SameSite=Strict`，对 `https://127.0.0.1:3080/api/remote.mux` 带 Cookie 握手得到 101 升级。
+
+### 证书与链路诊断
+
+```sh
+# 自签证书剩余有效期（默认模式）
+sudo openssl x509 -in /etc/dsh/tls/dsh.crt -noout -enddate
+# 证书 SAN 是否覆盖当前 MagicDNS 名称
+sudo openssl x509 -in /etc/dsh/tls/dsh.crt -noout -ext subjectAltName
+# 权限是否最小化：目录 0750、证书 0644、私钥 0640 root:dsh
+sudo ls -ld /etc/dsh/tls /etc/dsh/tls/dsh.crt /etc/dsh/tls/dsh.key
+# Serve 后端是不是原生 TLS
+sudo tailscale serve status --json
+# 端口上到底有没有代理
+sudo ss -ltnp | grep -E ':3080|:3081'
+```
+
+`openssl x509 -enddate` 的输出（`notAfter=...`）就是证书到期时间，写进工单时只需这一行，不要附带私钥。
 
 ## 版本与来源
 

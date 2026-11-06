@@ -51,3 +51,37 @@ verify_authenticated_entrypoint() {
     return 1
   fi
 }
+
+# verify_unauthenticated_entrypoint BASE_URL EXPECTED_CODE
+# The bare public URL must refuse anonymous access. Headers are not printed.
+verify_unauthenticated_entrypoint() {
+  local base_url=$1 expected=${2:-401}
+  local url="${base_url%/}/"
+  local http_code
+  if ! http_code=$(curl --silent --show-error --output /dev/null \
+      --write-out '%{http_code}' --max-time 15 "$url" 2>/dev/null); then
+    printf 'error: unauthenticated request to the entrypoint failed\n' >&2
+    return 1
+  fi
+  if [[ $http_code != "$expected" ]]; then
+    printf 'error: unauthenticated entrypoint returned HTTP %s, expected %s\n' "$http_code" "$expected" >&2
+    return 1
+  fi
+}
+
+# verify_login_redirect LOGIN_URL EXPECTED_CODE
+# The one-shot credential URL must redirect; neither the URL nor the token is
+# ever printed, only the status line.
+verify_login_redirect() {
+  local login_url=$1 expected=${2:-303}
+  local http_code
+  if ! http_code=$(curl --silent --show-error --output /dev/null \
+      --write-out '%{http_code}' --max-time 15 "$login_url" 2>/dev/null); then
+    printf 'error: credential login request failed\n' >&2
+    return 1
+  fi
+  if [[ $http_code != "$expected" ]]; then
+    printf 'error: credential login returned HTTP %s, expected %s\n' "$http_code" "$expected" >&2
+    return 1
+  fi
+}

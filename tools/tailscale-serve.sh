@@ -5,6 +5,13 @@ set -Eeuo pipefail
 : "${DSH_TAILSCALE_BIN:=tailscale}"
 : "${DSH_TAILSCALE_PORT:=443}"
 : "${DSH_PROXY_PORT:=3081}"
+# Backend Serve proxies to. Native TLS mode points Serve at the HTTPS listener
+# with https+insecure because the certificate is self-signed.
+: "${DSH_SERVE_BACKEND:=http://127.0.0.1:${DSH_PROXY_PORT}}"
+# Loopback ports this deployment has used for its own backend. An existing
+# handler pointing at one of them is ours, so a mode migration may replace it;
+# anything else is someone else's service and is never touched.
+: "${DSH_SERVE_OWN_PORT:=${DSH_PORT:-3080}}"
 
 _ts_json_field() {
   local json=$1 field=$2 value=''
@@ -21,6 +28,22 @@ _ts_json_field() {
 
 _ts_continue() {
   printf 'continue: sudo DSH_TAILSCALE_MODE=serve DSH_TAILSCALE_INSTALL=yes ./install.sh\n' >&2
+}
+
+# True when every backend URL in the Serve config points at a loopback port that
+# belongs to this deployment (the native TLS port or the legacy proxy port).
+_ts_owns_handler() {
+  local status=$1 backends backend port
+  # Real serve status uses "Proxy"; tolerate "Handler" from older/mocked shapes.
+  backends=$(printf '%s' "$status" | grep -oE '"(Proxy|Handler)"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/')
+  [[ -n $backends ]] || return 1
+  while IFS= read -r backend; do
+    [[ -n $backend ]] || continue
+    port=$(printf '%s' "$backend" | sed -nE 's#^[a-z+]*://(127\.0\.0\.1|localhost|\[::1\]):([0-9]+).*$#\2#p')
+    [[ -n $port ]] || return 1
+    [[ $port == "$DSH_SERVE_OWN_PORT" || $port == "$DSH_PROXY_PORT" ]] || return 1
+  done <<< "$backends"
+  return 0
 }
 
 tailscale_preflight() {
@@ -66,9 +89,10 @@ tailscale_preflight() {
   fi
 
   # Any existing Serve config is owned by someone else unless it already points
-  # at this deployment's loopback port. Never reset or replace other handlers.
+  # at one of this deployment's own loopback ports. Never reset or replace
+  # another service's handler.
   if [[ -n $serve_status && $serve_status != '{}' && $serve_status != 'null' ]]; then
-    if ! printf '%s' "$serve_status" | grep -Fq "127.0.0.1:${DSH_PROXY_PORT}" ||
+    if ! _ts_owns_handler "$serve_status" ||
        [[ $(printf '%s' "$serve_status" | grep -o '"Handler"' | wc -l) -gt 1 ]]; then
       printf 'error: Tailscale Serve already has a different handler; refusing to overwrite it.\n' >&2
       printf 'inspect with: sudo tailscale serve status --json\n' >&2
@@ -98,7 +122,9 @@ tailscale_serve_apply() {
   local host=$1
   [[ $host != *.invalid ]] || { printf 'error: cannot configure Serve with placeholder hostname %s\n' "$host" >&2; return 26; }
   # --bg changes only the current machine's Serve config; never use funnel.
-  if ! "$DSH_TAILSCALE_BIN" serve --bg --https="$DSH_TAILSCALE_PORT" "http://127.0.0.1:${DSH_PROXY_PORT}"; then
+  # In native TLS mode the backend is https+insecure because DSH presents a
+  # self-signed certificate that only Tailscale-internal traffic will see.
+  if ! "$DSH_TAILSCALE_BIN" serve --bg --https="$DSH_TAILSCALE_PORT" "$DSH_SERVE_BACKEND"; then
     printf 'error: Tailscale Serve could not enable HTTPS or install the handler; enable tailnet HTTPS and retry.\n' >&2
     _ts_continue
     return 22
@@ -107,7 +133,7 @@ tailscale_serve_apply() {
   final=$($DSH_TAILSCALE_BIN serve status --json 2>/dev/null) || {
     printf 'error: Serve apply returned success but status could not be read\n' >&2; return 27;
   }
-  printf '%s' "$final" | grep -Fq "127.0.0.1:${DSH_PROXY_PORT}" || {
-    printf 'error: Serve verification did not find the DSH proxy handler\n' >&2; return 27;
+  printf '%s' "$final" | grep -Fq "$DSH_SERVE_BACKEND" || {
+    printf 'error: Serve verification did not find the DSH backend handler\n' >&2; return 27;
   }
 }
