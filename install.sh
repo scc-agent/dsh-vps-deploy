@@ -146,33 +146,47 @@ node -e 'const [a,b,c]=process.versions.node.split(".").map(Number); if (a<24 ||
 if ! id "$DSH_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DSH_HOME" --create-home --shell /usr/sbin/nologin "$DSH_USER"
 fi
-install -d -o "$DSH_USER" -g "$DSH_USER" -m 0750 "$DSH_HOME"
-# The service user must be able to traverse /etc/dsh (to reach the TLS files)
-# but must not be able to write there.
-install -d -o root -g "$DSH_USER" -m 0750 /etc/dsh
+DSH_GROUP=$(id -gn "$DSH_USER") || fail "cannot resolve the primary group of $DSH_USER"
+install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_HOME"
+# The service user may traverse /etc/dsh (to reach the TLS files) but must not
+# be able to write to it.
+install -d -o root -g "$DSH_GROUP" -m 0750 /etc/dsh
 
 if [[ $DSH_NATIVE_TLS == yes ]]; then
   # Self-signed by default (10 years); an operator-supplied pair is used as-is.
   if [[ -z $DSH_TLS_CERT ]]; then
     cert_host=$DSH_TRUSTED_HOST
     [[ $cert_host == *.invalid ]] && fail 'native TLS needs a real MagicDNS host name to put in the certificate SAN'
-    gen_selfsigned_cert "$DSH_TLS_DIR" "$cert_host" "$DSH_USER" || fail 'self-signed certificate generation failed'
+    gen_selfsigned_cert "$DSH_TLS_DIR" "$cert_host" "$DSH_GROUP" || fail 'self-signed certificate generation failed'
     DSH_TLS_CERT="$DSH_TLS_DIR/dsh.crt"
     DSH_TLS_KEY="$DSH_TLS_DIR/dsh.key"
   fi
   [[ -r $DSH_TLS_CERT && -r $DSH_TLS_KEY ]] || fail 'native TLS certificate files are not readable'
   # systemd runs DSH as the service user, so the key group must be readable there.
   chmod 0644 "$DSH_TLS_CERT"
-  if ! chgrp "$DSH_USER" "$DSH_TLS_KEY" 2>/dev/null || ! chmod 0640 "$DSH_TLS_KEY"; then
-    printf 'warning: could not set %s to root:%s 0640; verify DSH can still read it\n' "$DSH_TLS_KEY" "$DSH_USER" >&2
+  if ! chgrp "$DSH_GROUP" "$DSH_TLS_KEY" 2>/dev/null || ! chmod 0640 "$DSH_TLS_KEY"; then
+    printf 'warning: could not set %s to root:%s 0640; verify DSH can still read it\n' "$DSH_TLS_KEY" "$DSH_GROUP" >&2
   fi
 fi
 
 npm_integrity="$(npm view "$PACKAGE" dist.integrity --registry=https://registry.npmjs.org)"
 [[ $npm_integrity == "$EXPECTED_INTEGRITY" ]] || fail "npm integrity mismatch for $PACKAGE"
 DSH_APP_DIR="$DSH_HOME/app"
-install -d -o "$DSH_USER" -g "$DSH_USER" -m 0750 "$DSH_APP_DIR"
-npm install --prefix "$DSH_APP_DIR" --omit=dev --ignore-scripts --bin-links=false "$PACKAGE"
+# Install into a fresh staging tree and swap it in: npm cannot reliably rewrite
+# an existing node_modules, and a half-updated tree is worse than none.
+app_stage="$DSH_HOME/.app.stage.$$"
+app_previous="$DSH_HOME/.app.previous.$$"
+cleanup_app_stage() { rm -rf "$app_stage" "$app_previous"; }
+trap cleanup_app_stage EXIT
+rm -rf "$app_stage" "$app_previous"
+install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$app_stage"
+npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false "$PACKAGE"
+STAGED_ENTRYPOINT="$app_stage/node_modules/@deepseek-ai/dsh/lib/bin.js"
+[[ -r $STAGED_ENTRYPOINT ]] || fail 'DSH entrypoint was not found in the staged installation'
+if [[ -d $DSH_APP_DIR ]]; then mv "$DSH_APP_DIR" "$app_previous"; fi
+mv "$app_stage" "$DSH_APP_DIR"
+rm -rf "$app_previous"
+trap - EXIT
 DSH_ENTRYPOINT="$DSH_APP_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
 [[ -r $DSH_ENTRYPOINT ]] || fail 'DSH entrypoint was not found after npm installation'
 DSH_BIN=/usr/local/libexec/dsh-cli
