@@ -120,6 +120,9 @@ if grep -Fq 'systemctl enable --now dsh-web-proxy.service' "$root/install.sh" &&
   die 'proxy service is enabled unconditionally'
 fi
 grep -Fq 'if [[ $DSH_USE_PROXY == yes ]]; then' "$root/install.sh" || die 'proxy enablement is not gated'
+grep -Fq 'systemctl restart "$UNIT_NAME"' "$root/install.sh" || die 'installer does not restart the unit, so a re-run would keep the old process'
+! grep -Fq 'systemctl enable --now "$UNIT_NAME"' "$root/install.sh" || die 'enable --now leaves an already-running unit on its old flags'
+pass 'installer restarts the unit so re-runs apply new flags'
 pass 'proxy service is never enabled by default'
 
 grep -Fq 'DSH_TLS_MODE=proxy' "$root/README.md" || die 'README does not document the proxy fallback switch'

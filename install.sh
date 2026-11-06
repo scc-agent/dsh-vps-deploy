@@ -251,8 +251,14 @@ if [[ $DSH_USE_PROXY == no && -e $proxy_unit_path ]]; then
   printf 'retired legacy %s (native TLS mode does not use it)\n' "$PROXY_UNIT_NAME"
 fi
 if [[ $DSH_ENABLE == yes ]]; then
-  systemctl enable --now "$UNIT_NAME"
-  if [[ $DSH_USE_PROXY == yes ]]; then systemctl enable --now "$PROXY_UNIT_NAME"; fi
+  # `enable --now` is a no-op on an already-running unit, which would leave the
+  # old process (old env file, old flags) serving traffic. Always restart.
+  systemctl enable "$UNIT_NAME"
+  systemctl restart "$UNIT_NAME"
+  if [[ $DSH_USE_PROXY == yes ]]; then
+    systemctl enable "$PROXY_UNIT_NAME"
+    systemctl restart "$PROXY_UNIT_NAME"
+  fi
 fi
 if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; then
   if [[ $DSH_NATIVE_TLS == yes ]]; then
