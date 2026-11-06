@@ -105,6 +105,7 @@ fi
 [[ -r "$SCRIPT_DIR/tools/tailscale-serve.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/tailscale-serve.sh"
 [[ -r "$SCRIPT_DIR/tools/verify-auth-cookie.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-auth-cookie.sh"
 [[ -r "$SCRIPT_DIR/tools/gen-selfsigned-cert.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/gen-selfsigned-cert.sh"
+[[ -r "$SCRIPT_DIR/tools/probe-url.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/probe-url.sh"
 [[ -r "$SCRIPT_DIR/tools/verify-ws.mjs" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-ws.mjs"
 [[ -r "$SCRIPT_DIR/bin/dsh-web-proxy.cjs" ]] || fail "missing resource: $SCRIPT_DIR/bin/dsh-web-proxy.cjs"
 [[ -r "$SCRIPT_DIR/systemd/dsh-web-proxy.service.in" ]] || fail "missing resource: $SCRIPT_DIR/systemd/dsh-web-proxy.service.in"
@@ -118,6 +119,7 @@ fi
 source "$SCRIPT_DIR/tools/tailscale-serve.sh"
 source "$SCRIPT_DIR/tools/verify-auth-cookie.sh"
 source "$SCRIPT_DIR/tools/gen-selfsigned-cert.sh"
+source "$SCRIPT_DIR/tools/probe-url.sh"
 
 tailscale_host=''
 if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; then

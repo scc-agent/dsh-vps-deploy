@@ -78,6 +78,10 @@ grep -Fq 'verify_login_redirect "$login_url" 303' "$root/install.sh" || die 'the
 grep -Fq 'ws_url="${probe_url%/}${DSH_WS_PATH}"' "$root/install.sh" || die 'the WS check still uses the advertised URL'
 grep -Fq 'dsh_probe_url "$DSH_TAILSCALE_MODE" "$DSH_PUBLIC_URL" "$DSH_PORT" "$DSH_NATIVE_TLS"' "$root/install.sh" \
   || die 'the installer does not derive a probe URL'
+grep -Fq 'source "$SCRIPT_DIR/tools/probe-url.sh"' "$root/install.sh" \
+  || die 'the installer never sources probe-url.sh, so dsh_probe_url is undefined'
+grep -Fq '$SCRIPT_DIR/tools/probe-url.sh' "$root/install.sh" \
+  || die 'probe-url.sh is missing from the installer resource checks'
 grep -Fq 'DSH_TRUSTED_HOST=$(ensure_trusted_loopback "$DSH_TRUSTED_HOST")' "$root/install.sh" \
   || die 'local-only does not trust the loopback authority'
 grep -Fq 'DSH_PUBLIC_URL=%q' "$root/install.sh" || die 'the advertised URL is no longer written to the env file'
