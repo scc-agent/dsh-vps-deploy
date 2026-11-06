@@ -108,6 +108,23 @@ set -e
 [[ $foreign -ne 0 ]] || die 'a foreign Serve handler was treated as ours'
 pass 'still refuses to take over a foreign Serve handler'
 
+# --- loopback login URL reconstruction --------------------------------------
+# The credential URL carries its token on the public root path; the installer
+# must reuse that path rather than assuming "/login".
+path_of() { printf '%s' "$1" | sed -E 's#^https?://[^/]+##'; }
+[[ $(path_of 'https://vps.test.ts.net/?token=redacted') == '/?token=redacted' ]] || die 'root-path credential URL was not preserved'
+[[ $(path_of 'https://vps.test.ts.net/ui/?token=redacted') == '/ui/?token=redacted' ]] || die 'prefixed credential URL lost its path'
+[[ $(path_of 'https://vps.test.ts.net') == '' ]] || die 'bare origin should yield an empty path'
+pass 'reconstructs the loopback login path from the public credential URL'
+
+set +e
+printf '%s' 'https://vps.test.ts.net/?token=redacted&x=1' > /dev/null
+grep -Fq 'public_path=' "$root/install.sh"
+pathed=$?
+set -e
+[[ $pathed -eq 0 ]] || die 'installer does not derive the loopback login path'
+pass 'installer derives the loopback login path from the credential URL'
+
 # --- installer defaults ------------------------------------------------------
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh" || die 'default mode is not serve'
 grep -Fq 'DSH_TLS_MODE:=native' "$root/install.sh" || die 'native TLS is not the default TLS mode'

@@ -291,19 +291,22 @@ if [[ $DSH_ENABLE == yes ]]; then
 
   # 3. WebSocket upgrade must be accepted on the DSH listener itself.
   if [[ $DSH_VERIFY_WS == yes ]]; then
+    # The credential lives on the public root path, so reuse that path (and any
+    # configured prefix) against the loopback listener instead of guessing.
+    public_path=$(printf '%s' "$login_url" | sed -E 's#^https?://[^/]+##')
+    [[ -n $public_path ]] || public_path='/'
     if [[ $DSH_NATIVE_TLS == yes ]]; then
       ws_url="https://127.0.0.1:${DSH_PORT}${DSH_WS_PATH}"
-      local_login="https://127.0.0.1:${DSH_PORT}/login"
+      local_login="https://127.0.0.1:${DSH_PORT}${public_path}"
     else
       ws_url="http://127.0.0.1:${DSH_PROXY_PORT}${DSH_WS_PATH}"
-      local_login="http://127.0.0.1:${DSH_PROXY_PORT}/login"
+      local_login="http://127.0.0.1:${DSH_PROXY_PORT}${public_path}"
     fi
-    token_query=$(printf '%s' "$login_url" | sed -n 's/^[^?]*\(\?.*\)$/\1/p')
     jar=$(mktemp)
     chmod 0600 "$jar"
     curl_args=(--silent --show-error --output /dev/null --max-time 15 -c "$jar")
     [[ $DSH_NATIVE_TLS == yes ]] && curl_args+=(--insecure)
-    curl "${curl_args[@]}" "${local_login}${token_query}" >/dev/null 2>&1 || true
+    curl "${curl_args[@]}" "$local_login" >/dev/null 2>&1 || true
     if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" \
         --host "$DSH_TRUSTED_HOST" --insecure; then
       rm -f "$jar"
