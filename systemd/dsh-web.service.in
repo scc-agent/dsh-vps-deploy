@@ -15,6 +15,7 @@ ExecReload=/bin/systemctl restart %N
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
+MemoryMax=768M
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

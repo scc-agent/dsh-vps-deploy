@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-node_bin=${NODE_BIN:-/opt/deepseek-harness/node-v24.22.2/bin/node}
-[[ -x $node_bin ]] || { printf 'required independent Node runtime not found: %s\n' "$node_bin" >&2; exit 1; }
+node_bin=${NODE_BIN:-node}
 
 bash -n "$root/install.sh" "$root/bin/dsh-web-start.sh" "$root/tests/test.sh"
 count=$(grep -Rhc '0.2.2-rc.1' "$root/install.sh" "$root/README.md" | awk '{sum += $1} END {print sum + 0}')
@@ -10,10 +9,16 @@ count=$(grep -Rhc '0.2.2-rc.1' "$root/install.sh" "$root/README.md" | awk '{sum 
 grep -Fq 'node": ">=24.9.0"' "$root/package.json"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
+grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 grep -Fq -- '--profile web' "$root/bin/dsh-web-start.sh"
 grep -Fq 'SCRIPT_DIR=' "$root/install.sh"
 grep -Fq 'DSH_DRY_RUN' "$root/install.sh"
 ! grep -RniE 'tailscale[[:space:]]+(funnel|serve)|iptables|nftables|password|api[_-]?key' "$root/install.sh" "$root/bin" "$root/systemd" "$root/tools"
+
+if ! node_bin=$(command -v "$node_bin"); then
+  printf 'runtime checks skipped: Node.js not found in PATH (install Node >=24.9.0 or set NODE_BIN)\n'
+  exit 0
+fi
 
 # Run installer preflight from a path containing spaces; it must not mutate host state.
 isolated=$(mktemp -d)

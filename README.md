@@ -9,7 +9,7 @@
 ## 目录
 
 - `install.sh`：最小、幂等安装器；只在 root 下运行，默认创建 `dsh` 独立用户、安装固定 npm 包并生成 unit。
-- `systemd/dsh-web.service.in`：systemd 模板。服务只绑定 `127.0.0.1`，不负责反代、证书签发或防火墙。
+- `systemd/dsh-web.service.in`：systemd 模板。服务只绑定 `127.0.0.1`，并限制最多使用 `768M` 内存；不负责反代、证书签发或防火墙。
 - `tools/login-url.ts`：从当前 systemd 主进程对应的本次启动日志读取最新启动凭据，并把它换算为正确的外部 URL。
 - `tests/test.sh`：不触碰宿主服务的 shell 静态检查与隔离 mock 测试。
 
