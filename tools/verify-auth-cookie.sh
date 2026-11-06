@@ -2,13 +2,24 @@
 # Verify the first authenticated response without exposing its URL or cookies.
 set -Eeuo pipefail
 
+# VERIFY_INSECURE=yes relaxes certificate checks for a loopback probe against
+# the DSH self-signed certificate. It must never be used for the public URL.
+_verify_curl_opts() {
+  VERIFY_CURL_OPTS=()
+  if [[ ${VERIFY_INSECURE:-no} == yes ]]; then
+    VERIFY_CURL_OPTS+=(--insecure)
+  fi
+}
+
 verify_authenticated_entrypoint() {
   local login_url=$1 require_secure=${2:-yes}
   local headers curl_error http_code
   headers=$(mktemp)
   curl_error=$(mktemp)
+  _verify_curl_opts
 
   if ! http_code=$(curl --silent --show-error --output /dev/null \
+      ${VERIFY_CURL_OPTS[@]+"${VERIFY_CURL_OPTS[@]}"} \
       --dump-header "$headers" --write-out '%{http_code}' --max-time 15 \
       "$login_url" 2>"$curl_error"); then
     rm -f "$headers" "$curl_error"
@@ -58,7 +69,9 @@ verify_unauthenticated_entrypoint() {
   local base_url=$1 expected=${2:-401}
   local url="${base_url%/}/"
   local http_code
+  _verify_curl_opts
   if ! http_code=$(curl --silent --show-error --output /dev/null \
+      ${VERIFY_CURL_OPTS[@]+"${VERIFY_CURL_OPTS[@]}"} \
       --write-out '%{http_code}' --max-time 15 "$url" 2>/dev/null); then
     printf 'error: unauthenticated request to the entrypoint failed\n' >&2
     return 1
@@ -75,7 +88,9 @@ verify_unauthenticated_entrypoint() {
 verify_login_redirect() {
   local login_url=$1 expected=${2:-303}
   local http_code
+  _verify_curl_opts
   if ! http_code=$(curl --silent --show-error --output /dev/null \
+      ${VERIFY_CURL_OPTS[@]+"${VERIFY_CURL_OPTS[@]}"} \
       --write-out '%{http_code}' --max-time 15 "$login_url" 2>/dev/null); then
     printf 'error: credential login request failed\n' >&2
     return 1

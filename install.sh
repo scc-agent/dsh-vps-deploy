@@ -11,6 +11,9 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${DSH_USER:=dsh}"
 : "${DSH_HOME:=/var/lib/dsh}"
+# Program code lives outside the service home so the service user (and the
+# agent it hosts) cannot rewrite its own installation.
+: "${DSH_APP_ROOT:=/opt/dsh}"
 : "${DSH_PORT:=3080}"
 : "${DSH_PROXY_PORT:=3081}"
 : "${DSH_ENABLE:=yes}"
@@ -51,7 +54,8 @@ Modes:
 
 Variables:
   DSH_USER=dsH                 service user (default dsh)
-  DSH_HOME=/var/lib/dsh        service home (default /var/lib/dsh)
+  DSH_HOME=/var/lib/dsh        service data dir, DSH_HOME (default /var/lib/dsh)
+  DSH_APP_ROOT=/opt/dsh        program root, app installed in $DSH_APP_ROOT/app
   DSH_PORT=3080                DSH listener port
   DSH_PROXY_PORT=3081          legacy proxy port (fallback modes only)
   DSH_TLS_CERT / DSH_TLS_KEY   use an existing certificate pair instead
@@ -71,6 +75,9 @@ fi
 [[ $DSH_DRY_RUN == yes || $DSH_DRY_RUN == no ]] || fail 'DSH_DRY_RUN must be yes or no'
 [[ $DSH_ENABLE == yes || $DSH_ENABLE == no ]] || fail 'DSH_ENABLE must be yes or no'
 [[ $DSH_VERIFY_WS == yes || $DSH_VERIFY_WS == no ]] || fail 'DSH_VERIFY_WS must be yes or no'
+[[ $DSH_APP_ROOT == /* && $DSH_APP_ROOT != / ]] || fail 'DSH_APP_ROOT must be an absolute path other than /'
+[[ $DSH_HOME == /* && $DSH_HOME != / ]] || fail 'DSH_HOME must be an absolute path other than /'
+[[ $DSH_APP_ROOT/ != "$DSH_HOME"/* && $DSH_HOME/ != "$DSH_APP_ROOT"/* ]] || fail 'DSH_APP_ROOT and DSH_HOME must not contain each other'
 
 # The legacy proxy topology is now strictly opt-in. DSH_TLS_MODE=proxy is the
 # short form of asking for it in the default serve mode.
@@ -137,6 +144,13 @@ if [[ $DSH_NATIVE_TLS == yes ]]; then
   # Native TLS terminates HTTPS locally, so the advertised origin must be https.
   [[ $DSH_PUBLIC_URL == https://* ]] || fail 'native TLS requires an https DSH_PUBLIC_URL so DSH marks its cookies Secure'
 fi
+if [[ $DSH_TAILSCALE_MODE == local-only ]]; then
+  # The post-install self-check probes http(s)://127.0.0.1:$DSH_PORT/, and DSH's
+  # /api browser-trust fence only accepts the loopback Host when the authority is
+  # trusted; without it a healthy service answers 421 to its own self-check.
+  # This only widens the fence for loopback, which is what DSH already binds.
+  DSH_TRUSTED_HOST=$(ensure_trusted_loopback "$DSH_TRUSTED_HOST")
+fi
 command -v node >/dev/null || fail 'Node.js is required (>= 24.9.0)'
 command -v npm >/dev/null || fail 'npm is required'
 command -v systemctl >/dev/null || fail 'systemd is required'
@@ -147,7 +161,19 @@ if ! id "$DSH_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DSH_HOME" --create-home --shell /usr/sbin/nologin "$DSH_USER"
 fi
 DSH_GROUP=$(id -gn "$DSH_USER") || fail "cannot resolve the primary group of $DSH_USER"
+DSH_APP_DIR="$DSH_APP_ROOT/app"
+DSH_WORKSPACE="$DSH_HOME/workspace"
+# Data dir: the service user owns it (it holds profiles, credentials, sessions
+# under $DSH_HOME/.dsh, and the agent workspace). World-inaccessible.
 install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_HOME"
+# Workspace: the DSH default working directory, a sibling of .dsh rather than
+# the home directory itself, so the agent never sees the data-dir layout root.
+install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_WORKSPACE"
+# Program root: root-owned and only readable by the service user. Combined with
+# ProtectSystem=strict + ReadWritePaths=$DSH_HOME the service cannot modify it,
+# and because it lives outside $DSH_HOME the agent cannot see it from its
+# workspace.
+install -d -o root -g root -m 0755 "$DSH_APP_ROOT"
 # The service user may traverse /etc/dsh (to reach the TLS files) but must not
 # be able to write to it.
 install -d -o root -g "$DSH_GROUP" -m 0750 /etc/dsh
@@ -155,7 +181,9 @@ install -d -o root -g "$DSH_GROUP" -m 0750 /etc/dsh
 if [[ $DSH_NATIVE_TLS == yes ]]; then
   # Self-signed by default (10 years); an operator-supplied pair is used as-is.
   if [[ -z $DSH_TLS_CERT ]]; then
-    cert_host=$DSH_TRUSTED_HOST
+    # The first authority is the advertised host name; extra loopback entries
+    # are only for the in-host trust fence, not certificate SANs.
+    cert_host=${DSH_TRUSTED_HOST%%[[:space:]]*}
     [[ $cert_host == *.invalid ]] && fail 'native TLS needs a real MagicDNS host name to put in the certificate SAN'
     gen_selfsigned_cert "$DSH_TLS_DIR" "$cert_host" "$DSH_GROUP" || fail 'self-signed certificate generation failed'
     DSH_TLS_CERT="$DSH_TLS_DIR/dsh.crt"
@@ -171,22 +199,38 @@ fi
 
 npm_integrity="$(npm view "$PACKAGE" dist.integrity --registry=https://registry.npmjs.org)"
 [[ $npm_integrity == "$EXPECTED_INTEGRITY" ]] || fail "npm integrity mismatch for $PACKAGE"
-DSH_APP_DIR="$DSH_HOME/app"
-# Install into a fresh staging tree and swap it in: npm cannot reliably rewrite
-# an existing node_modules, and a half-updated tree is worse than none.
-app_stage="$DSH_HOME/.app.stage.$$"
-app_previous="$DSH_HOME/.app.previous.$$"
+# Install into a fresh staging tree under the program root and swap it in: npm
+# cannot reliably rewrite an existing node_modules, and a half-updated tree is
+# worse than none. The tree stays root-owned, so the service user can only read
+# it (and the agent, whose workspace is $DSH_WORKSPACE, cannot see it at all).
+app_stage="$DSH_APP_ROOT/.app.stage.$$"
+app_previous="$DSH_APP_ROOT/.app.previous.$$"
 cleanup_app_stage() { rm -rf "$app_stage" "$app_previous"; }
 trap cleanup_app_stage EXIT
 rm -rf "$app_stage" "$app_previous"
-install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$app_stage"
+install -d -o root -g root -m 0755 "$app_stage"
 npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false "$PACKAGE"
 STAGED_ENTRYPOINT="$app_stage/node_modules/@deepseek-ai/dsh/lib/bin.js"
 [[ -r $STAGED_ENTRYPOINT ]] || fail 'DSH entrypoint was not found in the staged installation'
 if [[ -d $DSH_APP_DIR ]]; then mv "$DSH_APP_DIR" "$app_previous"; fi
 mv "$app_stage" "$DSH_APP_DIR"
 rm -rf "$app_previous"
+chmod 0755 "$DSH_APP_DIR"
 trap - EXIT
+# npm must never leave the program tree writable by the service user.
+chown -R root:root "$DSH_APP_DIR"
+# Retire the pre-split layout, where the program tree lived inside the service
+# home and was writable by the service user. Only ever remove a tree that is
+# recognisably ours; anything else is left for the operator to inspect.
+legacy_app="$DSH_HOME/app"
+if [[ -d $legacy_app ]]; then
+  if [[ -d $legacy_app/node_modules/@deepseek-ai/dsh ]]; then
+    rm -rf "$legacy_app"
+    printf 'removed the legacy program tree %s (programs now live in %s)\n' "$legacy_app" "$DSH_APP_DIR"
+  else
+    printf 'warning: %s exists but is not a DSH tree; leaving it alone\n' "$legacy_app" >&2
+  fi
+fi
 DSH_ENTRYPOINT="$DSH_APP_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js"
 [[ -r $DSH_ENTRYPOINT ]] || fail 'DSH entrypoint was not found after npm installation'
 DSH_BIN=/usr/local/libexec/dsh-cli
@@ -209,6 +253,8 @@ unit_template=$(<"$SCRIPT_DIR/systemd/dsh-web.service.in")
 unit_template=${unit_template//@MARKER@/$MARKER}
 unit_template=${unit_template//@DSH_USER@/$DSH_USER}
 unit_template=${unit_template//@DSH_HOME@/$DSH_HOME}
+unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
+unit_template=${unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
 printf '%s\n' "$unit_template" | install -m 0644 /dev/stdin "$unit_path"
 
 # The loopback proxy unit is only materialised for the opt-in fallback modes.
@@ -217,6 +263,8 @@ if [[ $DSH_USE_PROXY == yes ]]; then
   proxy_unit_template=${proxy_unit_template//@MARKER@/$MARKER}
   proxy_unit_template=${proxy_unit_template//@DSH_USER@/$DSH_USER}
   proxy_unit_template=${proxy_unit_template//@DSH_HOME@/$DSH_HOME}
+  proxy_unit_template=${proxy_unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
+  proxy_unit_template=${proxy_unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
   printf '%s\n' "$proxy_unit_template" | install -m 0644 /dev/stdin "$proxy_unit_path"
 fi
 
@@ -268,37 +316,60 @@ if [[ $DSH_TAILSCALE_MODE == serve || $DSH_TAILSCALE_MODE == serve-proxy ]]; the
     DSH_SERVE_BACKEND="http://127.0.0.1:${DSH_PROXY_PORT}"
   fi
   export DSH_SERVE_BACKEND
-  tailscale_serve_apply "$DSH_TRUSTED_HOST" || fail 'Tailscale Serve was not verified; no success is claimed'
+  tailscale_serve_apply "${DSH_TRUSTED_HOST%%[[:space:]]*}" || fail 'Tailscale Serve was not verified; no success is claimed'
 fi
 
 if [[ $DSH_ENABLE == yes ]]; then
   # Exercise the real authenticated entrypoint without printing the credential.
   command -v curl >/dev/null || fail 'curl is required to verify the authenticated entrypoint'
+  # Where to probe. In local-only mode DSH binds 127.0.0.1 only, so a
+  # non-loopback DSH_PUBLIC_URL is unreachable from the host: probing it would
+  # fail against a perfectly healthy service. Probe loopback there, and leave
+  # the advertised DSH_PUBLIC_URL (what DSH serves and what the operator uses)
+  # untouched.
+  probe_url=$(dsh_probe_url "$DSH_TAILSCALE_MODE" "$DSH_PUBLIC_URL" "$DSH_PORT" "$DSH_NATIVE_TLS")
+  VERIFY_INSECURE=$(dsh_probe_insecure "$DSH_TAILSCALE_MODE" "$DSH_NATIVE_TLS")
+  export VERIFY_INSECURE
+  probe_curl_insecure=()
+  ws_insecure=()
+  if [[ $VERIFY_INSECURE == yes ]]; then
+    # Only ever for the loopback probe of our own self-signed certificate.
+    probe_curl_insecure=(--insecure)
+    ws_insecure=(--insecure)
+  fi
+  if [[ $probe_url != "$DSH_PUBLIC_URL" ]]; then
+    printf 'self-check probes %s (loopback) because mode=%s binds 127.0.0.1 only; advertised URL stays %s\n' \
+      "$probe_url" "$DSH_TAILSCALE_MODE" "$DSH_PUBLIC_URL"
+  fi
+
   login_url=''
   for _ in {1..30}; do
-    login_url=$(node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$DSH_PUBLIC_URL" 2>/dev/null) && break
+    login_url=$(node --experimental-strip-types "$SCRIPT_DIR/tools/login-url.ts" --unit "$UNIT_NAME" --public-url "$probe_url" 2>/dev/null) && break
     sleep 1
   done
   [[ -n $login_url ]] || fail 'could not read the current startup credential; inspect the unit journal and rerun'
 
   # 1. Unauthenticated base URL must be refused.
-  verify_unauthenticated_entrypoint "$DSH_PUBLIC_URL" 401 || fail 'unauthenticated base URL was not rejected with 401'
+  verify_unauthenticated_entrypoint "$probe_url" 401 || fail 'unauthenticated base URL was not rejected with 401'
   # 2. The credential URL must redirect, and set a hardened cookie.
   verify_login_redirect "$login_url" 303 || fail 'credential login URL did not answer with a 303 redirect'
   verify_authenticated_entrypoint "$login_url" "$([[ $DSH_NATIVE_TLS == yes || $DSH_PROXY_SECURE_COOKIES == yes ]] && printf yes || printf no)" \
     || fail 'authenticated entrypoint did not satisfy the configured Cookie policy; refusing to claim installation success'
-  printf 'entry verification: 401 unauthenticated, 303 login redirect, hardened cookie at %s\n' "$DSH_PUBLIC_URL"
+  printf 'entry verification: 401 unauthenticated, 303 login redirect, hardened cookie at %s\n' "$probe_url"
 
-  # 3. WebSocket upgrade over the real external entrypoint: this is the path a
-  #    browser takes, so it exercises Serve (and the proxy in fallback mode).
-  #    The login cookie is scoped to that host, so it must be presented there.
+  # 3. WebSocket upgrade over the same origin a browser would use: the public
+  #    entrypoint in Serve modes (which exercises Serve), loopback in local-only
+  #    mode where nothing else is reachable. The login cookie is scoped to that
+  #    host, so it must be presented there.
   if [[ $DSH_VERIFY_WS == yes ]]; then
-    ws_url="${DSH_PUBLIC_URL%/}${DSH_WS_PATH}"
+    ws_url="${probe_url%/}${DSH_WS_PATH}"
     jar=$(mktemp)
     chmod 0600 "$jar"
-    curl --silent --show-error --output /dev/null --max-time 15 --insecure \
+    curl --silent --show-error --output /dev/null --max-time 15 \
+      ${probe_curl_insecure[@]+"${probe_curl_insecure[@]}"} \
       -c "$jar" "$login_url" >/dev/null 2>&1 || true
-    if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" --insecure; then
+    if node "$SCRIPT_DIR/tools/verify-ws.mjs" --url "$ws_url" --cookie-jar "$jar" \
+        ${ws_insecure[@]+"${ws_insecure[@]}"}; then
       rm -f "$jar"
       printf 'websocket verification: upgrade handshake returned 101 at %s\n' "$ws_url"
     else

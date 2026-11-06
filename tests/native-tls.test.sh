@@ -108,13 +108,16 @@ set -e
 [[ $foreign -ne 0 ]] || die 'a foreign Serve handler was treated as ours'
 pass 'still refuses to take over a foreign Serve handler'
 
-# The upgrade must be checked over the real external entrypoint (the browser
-# path, which exercises Serve), not a loopback shortcut that can disagree.
-grep -Fq 'ws_url="${DSH_PUBLIC_URL%/}${DSH_WS_PATH}"' "$root/install.sh" \
-  || die 'websocket check does not use the public entrypoint'
-grep -Fq -- '--cookie-jar "$jar" --insecure' "$root/install.sh" \
+# The upgrade must be checked over the same origin the probes use: the real
+# external entrypoint in Serve modes (the browser path, which exercises Serve),
+# and loopback only in local-only mode where nothing else is reachable.
+grep -Fq 'ws_url="${probe_url%/}${DSH_WS_PATH}"' "$root/install.sh" \
+  || die 'websocket check does not use the resolved probe entrypoint'
+grep -Fq -- '--cookie-jar "$jar"' "$root/install.sh" \
   || die 'websocket check does not present the login cookie'
-pass 'websocket check runs over the public entrypoint with the login cookie' 
+grep -Fq 'dsh_probe_url "$DSH_TAILSCALE_MODE" "$DSH_PUBLIC_URL"' "$root/install.sh" \
+  || die 'the probe entrypoint is not derived from the mode'
+pass 'websocket check runs over the probe entrypoint with the login cookie' 
 
 # --- installer defaults ------------------------------------------------------
 grep -Fq 'DSH_TAILSCALE_MODE:=serve' "$root/install.sh" || die 'default mode is not serve'

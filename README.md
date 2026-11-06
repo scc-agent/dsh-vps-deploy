@@ -38,6 +38,25 @@ sudo DSH_PUBLIC_URL=https://my-machine.example.ts.net/ \
 
 Serve 已有其他服务时安装器会退出，不会 reset、替换或重启其他服务。重复运行时，如果现有 handler 已经指向本模式的后端（默认 `https+insecure://127.0.0.1:3080`，回退模式为 `http://127.0.0.1:3081`），它会视为已配置；应用失败也不会冒充成功。从旧版本升级时，安装器会停用并移除遗留的 `dsh-web-proxy.service`。
 
+### 安装布局与目录权限
+
+程序、数据、工作区三者分开，agent 在自己工作区里看不到 DSH 程序文件：
+
+| 路径 | 所有者 / 权限 | 用途 |
+| --- | --- | --- |
+| `/opt/dsh/app` | `root:root` `0755`（目录树全部 root 所有） | npm 装的 DSH 程序（`node_modules/@deepseek-ai/dsh`），与服务用户的 `/tmp`、工作区完全隔离 |
+| `/var/lib/dsh` | `dsh:dsh` `0750` | 服务用户的数据目录（`DSH_HOME`），DSH 的 `profiles`、凭据、会话在 `/var/lib/dsh/.dsh` |
+| `/var/lib/dsh/workspace` | `dsh:dsh` `0750` | DSH 默认工作区，systemd 的 `WorkingDirectory` 指这里 |
+| `/etc/dsh` | `root:dsh` `0750` | 配置与自签证书（`/etc/dsh/dsh-web.env` 为 `0640`，私钥 `0640 root:dsh`） |
+
+由此得到三条性质：
+
+- 服务用户对 `/opt/dsh/app` 只有读和执行的权限，**不能写**，改不了自己的代码；配合 `ProtectSystem=strict` + `ReadWritePaths=/var/lib/dsh`，即使服务被攻破也无法落盘到程序目录。
+- agent 的默认工作区是 `/var/lib/dsh/workspace`，不是家目录本身，所以在工作区里列不出 `.dsh` 以外的目录布局，更碰不到 `/opt/dsh/app`。
+- 升级时安装器在 `/opt/dsh/.app.stage.<pid>` 装新树、原子换入、再强制 `chown -R root:root`，旧树在换入后才删。
+
+程序位置可用 `DSH_APP_ROOT`（默认 `/opt/dsh`）覆盖，工作区始终是 `$DSH_HOME/workspace`。
+
 ### 缺失、未登录或 HTTPS 未启用
 
 错误信息会明确区分：
@@ -59,6 +78,10 @@ Serve 已有其他服务时安装器会退出，不会 reset、替换或重启�
 sudo DSH_TAILSCALE_MODE=local-only ./install.sh
 ```
 
+这个模式下 DSH 只绑 `127.0.0.1`，所以 `DSH_PUBLIC_URL` 填非回环地址（例如 `https://vps-jp.tail21c504.ts.net:3082/`）时，安装器**自检探针改用回环地址**（`http://127.0.0.1:${DSH_PORT}/`；原生 TLS 下是 `https://` 并带 `--insecure` 只跳过本机自签证书校验），不会拿不可达的 public URL 去验 401/303/WS。写进 `/etc/dsh/dsh-web.env` 的 `DSH_PUBLIC_URL` 仍是用户给的真实值，只影响自检探针。同时安装器会把 `127.0.0.1` 追加进 `DSH_TRUSTED_HOST`，让 DSH 的 `/api` Host 信任栅栏接受回环探针，避免把健康服务判成 421。
+
+结论：local-only + 非回环 `DSH_PUBLIC_URL` 时安装器退出码为 0，不再误报失败。探针地址由 `tools/probe-url.sh` 决定：`serve`/`serve-proxy` 仍按 public URL 验（那才是浏览器的真实路径），只有 `local-only` 才走回环。
+
 `DSH_TAILSCALE_MODE=serve-proxy` 是旧的回退拓扑：DSH 明文跑 3080，本机代理监听 3081 并补 Secure Cookie，Serve 指向 3081。等价简写是 `DSH_TLS_MODE=proxy`。只有在原生 TLS 出问题时才需要它：
 
 ```sh
@@ -73,13 +96,14 @@ sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
 
 也可以自己提供证书：给出 `DSH_TLS_CERT` 和 `DSH_TLS_KEY` 即跳过自签生成，仍走原生 TLS（Serve 依旧 `https+insecure://`），且 `DSH_PUBLIC_URL` 必须是 HTTPS。自签相关的可调项：`DSH_TLS_MODE`（`native` 默认 / `proxy`）、`DSH_TLS_DIR`（默认 `/etc/dsh/tls`）、`DSH_TLS_KEY_TYPE`（`rsa2048` 默认 / `ecdsa`）、`DSH_TLS_DAYS`（默认 `3650`）。
 
-通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 内存上限为 768M，本机代理为 128M，均由独立用户运行。
+通用变量：`DSH_USER`（默认 `dsh`）、`DSH_HOME`（默认 `/var/lib/dsh`，服务数据目录与工作区的父目录）、`DSH_APP_ROOT`（默认 `/opt/dsh`，程序安装在 `$DSH_APP_ROOT/app`）、`DSH_PORT`（默认 `3080`）、`DSH_PROXY_PORT`（默认 `3081`）、`DSH_ENABLE`（默认 `yes`）。DSH 的 systemd 内存上限为 768M，本机代理为 128M，均由独立用户运行。
 
 ## 认证与验证
 
 - `tools/gen-selfsigned-cert.sh`：生成/复用自签证书。目录 `0750`、证书 `0644`、私钥 `0640` 且属主 `root`、组为 DSH 服务用户，SAN 含 MagicDNS 主机名、`localhost` 和 `127.0.0.1`；仍在有效期内且 SAN 匹配时不会重签。
 - `tools/rotate-native-tls.sh`：校验证书、私钥及公钥匹配后，原子替换同目录文件并只 reload `dsh-web.service`。
 - `tools/verify-ws.mjs`：对目标做一次真实 WebSocket upgrade 握手，只打印状态码，从不打印 Cookie 值。
+- `tools/probe-url.sh`：决定自检探针地址。`serve`/`serve-proxy`/`external-proxy` 用 `DSH_PUBLIC_URL`（浏览器真实路径），`local-only` 用回环地址；同时决定原生 TLS 下探针是否需要 `--insecure`，以及把 `127.0.0.1` 补进可信主机。
 
 安装器在服务启动后读取**本次启动**的 DSH 登录凭据，并做三道真实认证校验：
 
@@ -89,7 +113,7 @@ sudo DSH_TAILSCALE_MODE=serve-proxy ./install.sh
 
 任一项不符合就退出，不会声称安装成功。随后还会用带登录 Cookie 的请求对**真实外部入口**（`${DSH_PUBLIC_URL}/api/remote.mux`）做一次真正的 upgrade 握手，必须拿到 **101**。这条路径和浏览器一致，同时覆盖了 Serve；自签证书由脚本用 `--insecure` 只跳过本机校验。可用 `DSH_VERIFY_WS=no` 跳过 WS 检查，但不建议。
 
-> 说明：Cookie 是绑定到签发它的主机名的（原生 TLS 下是 `127.0.0.1`，代理回退下是公开的 MagicDNS 名），所以这条检查必须走公开入口；用 loopback 直连且改写 `Host` 会被 DSH 判成未认证。
+> 说明：Cookie 是绑定到签发它的主机名的（原生 TLS 下是 `127.0.0.1`，代理回退下是公开的 MagicDNS 名）。因此在 `serve` 模式下检查必须走公开入口，用 loopback 直连且不改 `Host` 会被 DSH 判成未认证；`local-only` 模式没有公开入口可达，探针改为回环 + `127.0.0.1` 可信主机（见「可选模式」）。
 
 完整登录链接不会写入本工具报告或 Git。操作者需要在自己的终端单独运行：
 
@@ -131,7 +155,7 @@ sudo journalctl -u dsh-web.service -b -n 100 --no-pager
 npm test
 ```
 
-`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、proxy 回退仍可用、代理服务默认不启用，以及从旧代理拓扑迁移时只接管属于自己的 Serve handler。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
+`tests/test.sh` 不接触宿主 systemd 或 Tailscale 状态：隔离 mock 覆盖未登录、HTTPS 未启用、Serve/Funnel 冲突、重复运行、成功和应用失败，以及 401/303 判定；Node 内置测试验证 Cookie Secure、Host 限制和 WebSocket 双向转发。`tests/native-tls.test.sh` 离线覆盖证书生成、SAN、10 年有效期、最小权限、复用与重签、ECDSA 选项、Serve 的 `https+insecure` 参数、默认模式为原生 TLS、proxy 回退仍可用、代理服务默认不启用，以及从旧代理拓扑迁移时只接管属于自己的 Serve handler。`tests/layout-local-only.test.sh` 离线覆盖安装布局（程序在 `$DSH_APP_ROOT/app` 且 root 所有、`WorkingDirectory` 指向 `$DSH_HOME/workspace`、程序目录不在 `ReadWritePaths` 里、`MemoryMax=768M` 不回归）和 local-only 自检（探针地址取回环、只有 loopback 探针才放宽证书校验、`127.0.0.1` 只补一次进可信主机，以及用 mock curl 端到端跑通 401/303/Cookie 且确认探针不会跑到 public URL）。`tests/verify-ws.test.cjs` 起一个真实的自签 HTTPS 服务，验证 `tools/verify-ws.mjs` 对带 Cookie 的升级握手给出 101、对无 Cookie 的握手上报失败、不跳过校验时会失败，且任何输出都不含 Cookie 值。测试不会执行 `install.sh`，不会改动宿主 systemd、Tailscale 或 `/etc/dsh`。
 
 2026-11-06 已在 Ubuntu 24.04 / Node 24.22.1 上完成实装验证：未认证入口 401、带令牌登录 303、Cookie 含 `Secure`/`HttpOnly`/`SameSite=Strict`，对 `https://127.0.0.1:3080/api/remote.mux` 带 Cookie 握手得到 101 升级。
 
@@ -154,7 +178,7 @@ sudo ss -ltnp | grep -E ':3080|:3081'
 
 ## 版本与来源
 
-- DSH：`@deepseek-ai/dsh@0.2.2-rc.1`，npm integrity 在 `install.sh` 中固定校验；依赖安装在独立的服务目录，不创建系统级 npm 命令链接。该 RC 仍是预览版；2026-11-06 在 Ubuntu 24.04 安装时 npm 报告 209 条依赖漏洞（201 高危、8 中危），不建议用于生产或敏感数据。
+- DSH：`@deepseek-ai/dsh@0.2.2-rc.1`，npm integrity 在 `install.sh` 中固定校验；依赖以 root 属主安装在 `/opt/dsh/app`（服务用户只读），不创建系统级 npm 命令链接。该 RC 仍是预览版；2026-11-06 在 Ubuntu 24.04 安装时 npm 报告 209 条依赖漏洞（201 高危、8 中危），不建议用于生产或敏感数据。
 - DSH 官方仓库：[deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)。
 - Tailscale Serve：[官方 CLI 文档](https://tailscale.com/kb/1242/tailscale-serve)。
 - Tailscale HTTPS：[官方说明](https://tailscale.com/kb/1153/enabling-https)。

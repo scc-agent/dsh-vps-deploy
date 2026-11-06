@@ -3,8 +3,9 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
 bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" \
-  "$root/tools/gen-selfsigned-cert.sh" "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" \
-  "$root/tests/test.sh" "$root/tests/native-tls.test.sh"
+  "$root/tools/gen-selfsigned-cert.sh" "$root/tools/probe-url.sh" \
+  "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" \
+  "$root/tests/test.sh" "$root/tests/native-tls.test.sh" "$root/tests/layout-local-only.test.sh"
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
@@ -23,6 +24,7 @@ grep -Fq 'DSH_ENTRYPOINT' "$root/bin/dsh-cli.sh"
 ! grep -Fq 'npm install --global' "$root/install.sh"
 # Tests must never execute the real installer (it would touch the host).
 ! grep -RqE '(^|[^[:alnum:]_])(bash|sh|source)[[:space:]]+"?\$root/install\.sh' "$root/tests/native-tls.test.sh" \
+  "$root/tests/layout-local-only.test.sh" \
   || { printf 'refusing to run: a test executes install.sh\n' >&2; exit 1; }
 grep -Fq 'MemoryMax=768M' "$root/systemd/dsh-web.service.in"
 ! grep -RniE 'curl[^\n]*\|[[:space:]]*sh|tailscale[[:space:]]+funnel' "$root/install.sh" "$root/bin" "$root/systemd"
@@ -163,4 +165,5 @@ else
   printf 'proxy runtime tests skipped: Node.js is unavailable\n'
 fi
 bash "$root/tests/native-tls.test.sh"
-printf 'static, secure-cookie, 401/303, proxy, native TLS, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
+bash "$root/tests/layout-local-only.test.sh"
+printf 'static, secure-cookie, 401/303, proxy, native TLS, layout, local-only probe, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
