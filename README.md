@@ -95,7 +95,7 @@ sudo DSH_TAILSCALE_MODE=local-only ./install.sh   # 只绑回环，走 SSH 隧�
 npm test    # 非 root 也能跑，CI 用同一条命令
 ```
 
-离线覆盖 Serve/Funnel 冲突（真实 `Handlers`/`Proxy` JSON 形状）、401/303、Cookie 三属性、本地代理 Host 与 WS 转发、证书与 SAN、安装布局与权限、local-only 探针、env 转义，以及一个真实的自签 HTTPS 服务验证 WS 握手。
+离线覆盖 Serve/Funnel 冲突（真实 `Handlers`/`Proxy` JSON 形状）、401/303、Cookie 三属性、证书与 SAN、安装布局与权限、local-only 探针，以及一个真实的自签 HTTPS 服务验证 WS 握手。env 文件只用 grep 断言过没退回 `%q`，没有行为测试。
 
 **它不能证明的**：真实 systemd 加载 unit、活的 Tailscale、对运行中 DSH 的端到端握手。测试全绿只说明逻辑成立。2026-11-06 在 Ubuntu 24.04 / Node 24.22.1 上做过实装验证，四项检查全部通过。
 
@@ -115,7 +115,13 @@ sudo openssl x509 -in /etc/dsh/tls/dsh.crt -noout -enddate
 
 - **不提供回滚**：升级时新树原子换入、旧树随后删除，失败后回不到上一版本。升级前先备份 `$DSH_HOME`。
 - 自签证书到期（默认 10 年）需重新生成并重启服务，没有自动续期；外层 Tailscale 证书是自动的。
-- DSH 是 `0.2.2-rc.1` 预览版。2026-11-06 安装时 npm 报告 209 条依赖漏洞（201 高危、8 中危），不要用于生产或敏感数据。
+- DSH 是 `0.2.2-rc.1` 预览版。2026-11-06 安装时 npm 报告 209 条依赖漏洞（201 高危、8 中危），不要用于生产或敏感数据。安装树不带 lockfile，直接在里面跑 `npm audit` 会报 `ENOLOCK`，要审就这样：
+
+  ```sh
+  mkdir -p /tmp/audit
+  npm install --package-lock-only --prefix /tmp/audit @deepseek-ai/dsh@0.2.2-rc.1
+  cd /tmp/audit && npm audit --omit=dev
+  ```
 
 ## 来源
 
