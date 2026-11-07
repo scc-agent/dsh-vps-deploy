@@ -139,7 +139,7 @@ pass 'no proxy unit is installed or enabled'
 
 ! grep -Fq 'DSH_TLS_MODE' "$root/README.md" || die 'README still documents the removed TLS mode switch'
 grep -Fq 'DSH_TAILSCALE_MODE=local-only' "$root/README.md" || die 'README no longer documents local-only'
-grep -Fq 'openssl x509 -enddate' "$root/README.md" || die 'README diagnostics lack the expiry command'
+grep -Fq -- '-noout -enddate' "$root/README.md" || die 'README diagnostics lack the expiry command'
 pass 'README documents native TLS, local-only, and the expiry check'
 
 if command -v "$node_bin" >/dev/null 2>&1; then

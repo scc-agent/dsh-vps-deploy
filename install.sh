@@ -221,7 +221,11 @@ cleanup_app_stage() { rm -rf "$app_stage" "$app_previous" "$pkg_tmp"; }
 trap cleanup_app_stage EXIT
 rm -rf "$app_stage" "$app_previous"
 install -d -o root -g root -m 0755 "$app_stage"
-npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false "$pkg_tarball"
+# --no-save/--no-package-lock keep npm from baking the temporary tarball path
+# into the installed tree: it would record "file:/tmp/…/dsh-<ver>.tgz" for a file
+# the cleanup trap deletes, leaving a dangling dependency spec nobody can replay.
+npm install --prefix "$app_stage" --omit=dev --ignore-scripts --bin-links=false \
+  --no-save --no-package-lock "$pkg_tarball"
 STAGED_ENTRYPOINT="$app_stage/node_modules/@deepseek-ai/dsh/lib/bin.js"
 [[ -r $STAGED_ENTRYPOINT ]] || fail 'DSH entrypoint was not found in the staged installation'
 if [[ -d $DSH_APP_DIR ]]; then mv "$DSH_APP_DIR" "$app_previous"; fi
