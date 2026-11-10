@@ -166,6 +166,14 @@ fi
 DSH_GROUP=$(id -gn "$DSH_USER") || fail "cannot resolve the primary group of $DSH_USER"
 DSH_APP_DIR="$DSH_APP_ROOT/app"
 DSH_WORKSPACE="$DSH_HOME/workspace"
+# DSH data home: the DSH application's own data directory, where profiles,
+# credentials and sessions live ($DSH_HOME/.dsh). This is what the DSH_HOME
+# environment variable means to DSH itself, and it is NOT the same as the
+# installer's $DSH_HOME (the service user's home). Pin it in the service env
+# file below so the service and any CLI invocation agree on where the live
+# profile is; pointing a CLI at $DSH_HOME instead silently targets an empty
+# profile tree and the plugin never loads.
+DSH_DATA_HOME="$DSH_HOME/.dsh"
 # Data dir: the service user owns it (it holds profiles, credentials, sessions
 # under $DSH_HOME/.dsh, and the agent workspace). World-inaccessible.
 install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_HOME"
@@ -294,6 +302,7 @@ trap 'rm -f "$env_tmp"' EXIT
   env_line DSH_BIN "$DSH_BIN"
   env_line DSH_NODE "$(command -v node)"
   env_line DSH_ENTRYPOINT "$DSH_ENTRYPOINT"
+  env_line DSH_HOME "$DSH_DATA_HOME"
   env_line DSH_PUBLIC_URL "$DSH_PUBLIC_URL"
   env_line DSH_TRUSTED_HOST "$DSH_TRUSTED_HOST"
   env_line DSH_PORT "$DSH_PORT"

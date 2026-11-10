@@ -66,6 +66,8 @@ sudo DSH_TAILSCALE_MODE=local-only ./install.sh   # 只绑回环，走 SSH 隧�
 
 服务用户**改不了自己的程序**（`ProtectSystem=strict` + `ReadWritePaths=/var/lib/dsh`），agent 在工作区里看不到程序目录；升级时先装到 `.app.stage.<pid>`，原子换入后才删旧树。
 
+**DSH_HOME 写死了**：服务在 `/etc/dsh/dsh-web.env` 里把 DSH 程序认的 `DSH_HOME`（数据目录）固定为 `/var/lib/dsh/.dsh`，profile 在 `/var/lib/dsh/.dsh/profiles/web`。注意它和安装器的 `DSH_HOME` 变量不是一个意思——安装器的 `DSH_HOME` 是服务用户的家目录（`/var/lib/dsh`），而 DSH 程序认的 `DSH_HOME` 是数据目录（`/var/lib/dsh/.dsh`）。手动跑 DSH 命令时必须用数据目录（`DSH_HOME=/var/lib/dsh/.dsh`），用家目录会指到一个空的 profile，插件装了也不加载。
+
 **边界范围**：它挡的是「agent 改写自己的程序」，不是「agent 拿不到 DSH 的秘密」。agent 与服务同用户，所以能读到 `.dsh` 里的凭据、`/etc/dsh/tls/dsh.key` 和 `/etc/dsh/dsh-web.env`。要真正隔离得拆用户加 namespace，本工具没做。
 
 ## 配置项

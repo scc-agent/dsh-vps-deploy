@@ -89,6 +89,10 @@ grep -Fq 'DSH_TRUSTED_HOST=$(ensure_trusted_loopback "$DSH_TRUSTED_HOST")' "$roo
   || die 'local-only does not trust the loopback authority'
 grep -Fq 'env_line DSH_PUBLIC_URL "$DSH_PUBLIC_URL"' "$root/install.sh" \
   || die 'the advertised URL is no longer written to the env file'
+grep -Fq 'DSH_DATA_HOME="$DSH_HOME/.dsh"' "$root/install.sh" \
+  || die 'the DSH data home is not defined as $DSH_HOME/.dsh'
+grep -Fq 'env_line DSH_HOME "$DSH_DATA_HOME"' "$root/install.sh" \
+  || die 'the service env file no longer pins DSH_HOME, so a CLI can target the wrong profile tree'
 pass 'the self-check probes loopback while DSH keeps the real public URL'
 
 # --- end to end with a mock curl -------------------------------------------
