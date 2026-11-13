@@ -40,6 +40,11 @@ readonly DSH_WS_PATH='/api/remote.mux'
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# Validation-only guards. Loaded before the input checks because those checks
+# call into it, and before any host change so a dry run exercises the same path.
+[[ -r "$SCRIPT_DIR/tools/preflight-guards.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/preflight-guards.sh"
+source "$SCRIPT_DIR/tools/preflight-guards.sh"
+
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   cat <<'USAGE'
 usage: sudo ./install.sh
@@ -84,6 +89,12 @@ fi
 [[ $DSH_APP_ROOT == /* && $DSH_APP_ROOT != / ]] || fail 'DSH_APP_ROOT must be an absolute path other than /'
 [[ $DSH_HOME == /* && $DSH_HOME != / ]] || fail 'DSH_HOME must be an absolute path other than /'
 [[ $DSH_APP_ROOT/ != "$DSH_HOME"/* && $DSH_HOME/ != "$DSH_APP_ROOT"/* ]] || fail 'DSH_APP_ROOT and DSH_HOME must not contain each other'
+# Both guards below are validation only: they read the filesystem and refuse
+# unsafe inputs before anything on the host is changed. They live in
+# tools/preflight-guards.sh so the tests can exercise them without installing.
+require_safe_dsh_home "$DSH_HOME" || exit 1
+require_safe_tls_dir "$DSH_TLS_DIR" || exit 1
+require_safe_app_root "$DSH_APP_ROOT" || exit 1
 # systemd reads a bare memory number as bytes, so DSH_MEMORY_MAX=1024 would mean
 # a 1 KiB ceiling and a unit that never starts. Require the suffix instead of
 # letting that fail silently at cgroup level.
@@ -109,6 +120,7 @@ fi
 [[ -r "$SCRIPT_DIR/tools/verify-auth-cookie.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-auth-cookie.sh"
 [[ -r "$SCRIPT_DIR/tools/gen-selfsigned-cert.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/gen-selfsigned-cert.sh"
 [[ -r "$SCRIPT_DIR/tools/probe-url.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/probe-url.sh"
+[[ -r "$SCRIPT_DIR/tools/tmp-cleanup.sh" ]] || fail "missing resource: $SCRIPT_DIR/tools/tmp-cleanup.sh"
 [[ -r "$SCRIPT_DIR/tools/verify-ws.mjs" ]] || fail "missing resource: $SCRIPT_DIR/tools/verify-ws.mjs"
 
 if [[ $DSH_DRY_RUN == yes ]]; then
@@ -116,6 +128,12 @@ if [[ $DSH_DRY_RUN == yes ]]; then
     "$DSH_TAILSCALE_MODE" "$([[ $DSH_NATIVE_TLS == yes ]] && printf selfsigned || printf none)" "$SCRIPT_DIR" "$UNIT_NAME"
   exit 0
 fi
+
+# Every temporary path is tracked in one list with one EXIT trap. Individual
+# `trap ... EXIT` calls overwrite each other in bash, which is what used to leave
+# the npm tarball in /tmp after a successful install.
+source "$SCRIPT_DIR/tools/tmp-cleanup.sh"
+tmp_install_trap
 
 source "$SCRIPT_DIR/tools/tailscale-serve.sh"
 source "$SCRIPT_DIR/tools/verify-auth-cookie.sh"
@@ -184,7 +202,14 @@ install -d -o "$DSH_USER" -g "$DSH_GROUP" -m 0750 "$DSH_WORKSPACE"
 # ProtectSystem=strict + ReadWritePaths=$DSH_HOME the service cannot modify it,
 # and because it lives outside $DSH_HOME the agent cannot see it from its
 # workspace.
-install -d -o root -g root -m 0755 "$DSH_APP_ROOT"
+#
+# require_safe_app_root already vetted an existing tree (root-owned, not
+# group/world-writable). Only create the directory when it is missing: `install
+# -d` re-applies owner and mode to a directory that already exists, so reusing it
+# here would silently widen a tree we did not create.
+if [[ ! -d $DSH_APP_ROOT ]]; then
+  install -d -o root -g root -m 0755 "$DSH_APP_ROOT"
+fi
 # The service user may traverse /etc/dsh (to reach the TLS files) but must not
 # be able to write to it.
 install -d -o root -g "$DSH_GROUP" -m 0750 /etc/dsh
@@ -212,7 +237,7 @@ fi
 # file. Comparing a separately-queried "npm view dist.integrity" would not bind
 # the check to the bytes actually installed (TOCTOU).
 pkg_tmp=$(mktemp -d)
-trap 'rm -rf "$pkg_tmp"' EXIT
+tmp_track "$pkg_tmp"
 npm pack "$PACKAGE" --pack-destination "$pkg_tmp" --registry=https://registry.npmjs.org >/dev/null \
   || fail "could not download $PACKAGE"
 pkg_tarball=$(find "$pkg_tmp" -maxdepth 1 -name '*.tgz' -print -quit)
@@ -225,8 +250,8 @@ pkg_integrity="sha512-$(openssl dgst -sha512 -binary "$pkg_tarball" | openssl ba
 # it (and the agent, whose workspace is $DSH_WORKSPACE, cannot see it at all).
 app_stage="$DSH_APP_ROOT/.app.stage.$$"
 app_previous="$DSH_APP_ROOT/.app.previous.$$"
-cleanup_app_stage() { rm -rf "$app_stage" "$app_previous" "$pkg_tmp"; }
-trap cleanup_app_stage EXIT
+tmp_track "$app_stage"
+tmp_track "$app_previous"
 rm -rf "$app_stage" "$app_previous"
 install -d -o root -g root -m 0755 "$app_stage"
 # --no-save/--no-package-lock keep npm from baking the temporary tarball path
@@ -240,7 +265,6 @@ if [[ -d $DSH_APP_DIR ]]; then mv "$DSH_APP_DIR" "$app_previous"; fi
 mv "$app_stage" "$DSH_APP_DIR"
 rm -rf "$app_previous"
 chmod 0755 "$DSH_APP_DIR"
-trap - EXIT
 # npm must never leave the program tree writable by the service user.
 chown -R root:root "$DSH_APP_DIR"
 # Retire the pre-split layout, where the program tree lived inside the service
@@ -276,6 +300,7 @@ printf '%s\n' "$start_template" | install -m 0755 /dev/stdin /usr/local/libexec/
 unit_template=$(<"$SCRIPT_DIR/systemd/dsh-web.service.in")
 unit_template=${unit_template//@MARKER@/$MARKER}
 unit_template=${unit_template//@DSH_USER@/$DSH_USER}
+unit_template=${unit_template//@DSH_GROUP@/$DSH_GROUP}
 unit_template=${unit_template//@DSH_HOME@/$DSH_HOME}
 unit_template=${unit_template//@DSH_WORKSPACE@/$DSH_WORKSPACE}
 unit_template=${unit_template//@DSH_APP_DIR@/$DSH_APP_DIR}
@@ -297,7 +322,7 @@ env_escape() {
 }
 env_line() { printf '%s=%s\n' "$1" "$(env_escape "$2")"; }
 env_tmp=$(mktemp /etc/dsh/dsh-web.env.XXXXXX)
-trap 'rm -f "$env_tmp"' EXIT
+tmp_track "$env_tmp"
 {
   env_line DSH_BIN "$DSH_BIN"
   env_line DSH_NODE "$(command -v node)"
@@ -310,10 +335,9 @@ trap 'rm -f "$env_tmp"' EXIT
   env_line DSH_TLS_CERT "$DSH_TLS_CERT"
   env_line DSH_TLS_KEY "$DSH_TLS_KEY"
 } > "$env_tmp"
-chown root:"$DSH_USER" "$env_tmp"
+chown root:"$DSH_GROUP" "$env_tmp"
 chmod 0640 "$env_tmp"
 mv -f "$env_tmp" /etc/dsh/dsh-web.env
-trap - EXIT
 
 systemctl daemon-reload
 if [[ -e $proxy_unit_path ]]; then

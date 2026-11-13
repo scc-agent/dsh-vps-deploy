@@ -51,6 +51,20 @@ cert_posture_ok() {
   fi
 }
 
+# resolve_group_name NAME_OR_USER -> the group name to own the key.
+# The third positional argument is a GROUP (install.sh passes the service user's
+# primary group). Resolving it with `id -gn` alone treated it as a USER name and
+# failed whenever a group existed without a same-named user, so look for a real
+# group first and only then fall back to a user's primary group.
+resolve_group_name() {
+  local candidate=$1
+  if getent group "$candidate" >/dev/null 2>&1; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  id -gn "$candidate" 2>/dev/null
+}
+
 # gen_selfsigned_cert CERT_DIR HOST [GROUP] [--force]
 gen_selfsigned_cert() {
   local dir='' host='' group='' force=no arg
@@ -67,7 +81,10 @@ gen_selfsigned_cert() {
 
   local group_name='root'
   if [[ -n $group ]]; then
-    group_name=$(id -gn "$group" 2>/dev/null) || { printf 'error: unknown service user: %s\n' "$group" >&2; return 1; }
+    group_name=$(resolve_group_name "$group") || {
+      printf 'error: %s is neither an existing group nor a user with a primary group\n' "$group" >&2
+      return 1
+    }
   fi
 
   local cert="$dir/${DSH_TLS_CERT_NAME}" key="$dir/${DSH_TLS_KEY_NAME}"

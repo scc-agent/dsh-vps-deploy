@@ -3,12 +3,20 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 node_bin=${NODE_BIN:-node}
 bash -n "$root/install.sh" "$root/tools/tailscale-serve.sh" "$root/tools/verify-auth-cookie.sh" \
-  "$root/tools/gen-selfsigned-cert.sh" "$root/tools/probe-url.sh" \
+  "$root/tools/gen-selfsigned-cert.sh" "$root/tools/probe-url.sh" "$root/tools/tmp-cleanup.sh" "$root/tools/preflight-guards.sh" \
   "$root/bin/dsh-web-start.sh" "$root/bin/dsh-cli.sh" \
-  "$root/tests/test.sh" "$root/tests/native-tls.test.sh" "$root/tests/layout-local-only.test.sh"
+  "$root/tests/test.sh" "$root/tests/native-tls.test.sh" "$root/tests/layout-local-only.test.sh" \
+  "$root/tests/group-and-guards.test.sh"
 
 # The env file is parsed by systemd, not bash: %q quoting would leak bash syntax.
-! grep -Fq "printf 'DSH_BIN=%q" "$root/install.sh" || { printf 'env file still uses bash %q quoting\n' >&2; exit 1; }
+# Assert on the writer that actually emits the file (env_line/env_escape) rather
+# than on a literal that could never appear in the source.
+grep -Fq 'env_line() { printf' "$root/install.sh" \
+  || { printf 'env_line writer is missing\n' >&2; exit 1; }
+# %q may only survive in prose; an executable line using it would emit bash-only
+# quoting into a file systemd parses, not bash.
+! grep -vE '^[[:space:]]*#' "$root/install.sh" | grep -Fq '%q' \
+  || { printf 'env file still uses bash %q quoting\n' >&2; exit 1; }
 grep -Fq '0.2.2-rc.1' "$root/install.sh"
 grep -Fq '127.0.0.1' "$root/bin/dsh-web-start.sh"
 grep -Fq 'NoNewPrivileges=true' "$root/systemd/dsh-web.service.in"
@@ -186,4 +194,5 @@ else
 fi
 bash "$root/tests/native-tls.test.sh"
 bash "$root/tests/layout-local-only.test.sh"
+bash "$root/tests/group-and-guards.test.sh"
 printf 'static, secure-cookie, 401/303, native TLS, layout, local-only probe, preflight, conflict, repeat, apply-failure, and isolated mock checks passed\n'
