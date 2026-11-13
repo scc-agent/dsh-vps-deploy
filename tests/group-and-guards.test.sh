@@ -53,9 +53,11 @@ set -e
 ok 'certificate helper refuses an unknown group name'
 
 # --- 3. DSH_HOME under ProtectHome paths must be refused -------------------
+# Dry run: the suite must pass unprivileged (see README), and a dry run still
+# reaches every input guard before it stops.
 for bad_home in /home/dsh /root/dsh /run/user/0/dsh; do
   set +e
-  DSH_DRY_RUN=no DSH_HOME="$bad_home" bash "$root/install.sh" >/dev/null 2>"$tmp/err"
+  DSH_DRY_RUN=yes DSH_HOME="$bad_home" bash "$root/install.sh" >/dev/null 2>"$tmp/err"
   actual=$?
   set -e
   [[ $actual -ne 0 ]] || fail "DSH_HOME=$bad_home was accepted although ProtectHome=true hides it"
@@ -85,7 +87,7 @@ if [[ $(id -u) -eq 0 ]]; then
   install -d -o nobody -g nogroup -m 0700 "$foreign" 2>/dev/null || install -d -m 0700 "$foreign"
   chown nobody "$foreign" 2>/dev/null || true
   set +e
-  DSH_DRY_RUN=no DSH_APP_ROOT="$foreign" DSH_HOME=/var/lib/dsh bash "$root/install.sh" >/dev/null 2>"$tmp/err2"
+  DSH_DRY_RUN=yes DSH_APP_ROOT="$foreign" DSH_HOME=/var/lib/dsh bash "$root/install.sh" >/dev/null 2>"$tmp/err2"
   actual=$?
   set -e
   [[ $actual -ne 0 ]] || fail 'a DSH_APP_ROOT owned by another user was taken over'
