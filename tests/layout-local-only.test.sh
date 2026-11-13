@@ -42,10 +42,15 @@ fake_workspace=/var/lib/dsh/workspace
 fake_app=/opt/dsh/app
 unit_template=${unit_template//@MARKER@/marker}
 unit_template=${unit_template//@DSH_USER@/dsh}
+unit_template=${unit_template//@DSH_GROUP@/dsh}
 unit_template=${unit_template//@DSH_HOME@/$fake_home}
 unit_template=${unit_template//@DSH_WORKSPACE@/$fake_workspace}
 unit_template=${unit_template//@DSH_APP_DIR@/$fake_app}
 printf '%s\n' "$unit_template" > "$work/unit"
+grep -Fqx 'User=dsh' "$work/unit" || die 'rendered unit lost its service user'
+grep -Fqx 'Group=dsh' "$work/unit" || die 'rendered unit does not use the resolved group'
+! grep -Eq '^(User|Group|WorkingDirectory)=.*@DSH_' "$work/unit" \
+  || die 'rendered unit still contains an unsubstituted placeholder in a rendered field'
 grep -Fqx 'WorkingDirectory=/var/lib/dsh/workspace' "$work/unit" || die 'rendered unit does not use the workspace'
 grep -Fqx 'ReadWritePaths=/var/lib/dsh' "$work/unit" || die 'rendered unit writable set is wrong'
 ! grep -Fq '/opt/dsh' <(grep -E '^(ReadWritePaths|WorkingDirectory)=' "$work/unit") \
